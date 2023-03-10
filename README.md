@@ -4,7 +4,7 @@
 
 ## GigaGAN - Pytorch (wip)
 
-Implementation of <a href="https://arxiv.org/abs/2303.05511">GigaGAN</a> <a href="https://mingukkang.github.io/GigaGAN/">(project page)</a>, new SOTA GAN out of Adobe
+Implementation of <a href="https://arxiv.org/abs/2303.05511">GigaGAN</a> <a href="https://mingukkang.github.io/GigaGAN/">(project page)</a>, new SOTA GAN out of Adobe. I may also add a few findings from <a href="https://github.com/lucidrains/lightweight-gan">lightweight gan</a>, for further stability during training.
 
 ## Citations
 
