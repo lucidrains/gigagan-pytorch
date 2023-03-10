@@ -1,8 +1,6 @@
 <img src="./gigagan-sample.png" width="500px"></img>
 
-<img src="./gigagan-generator.png" width="450px"></img>
-
-<img src="./gigagan-discriminator.png" width="450px"></img>
+<img src="./gigagan-architecture.png" width="500px"></img>
 
 ## GigaGAN - Pytorch (wip)
 
