@@ -1,6 +1,6 @@
 ## GigaGAN - Pytorch (wip)
 
-Implementation of <a href="https://arxiv.org/abs/2303.05511">GigaGAN</a>, new SOTA GAN out of Adobe
+Implementation of <a href="https://arxiv.org/abs/2303.05511">GigaGAN</a> <a href="https://mingukkang.github.io/GigaGAN/">(project page)</a>, new SOTA GAN out of Adobe
 
 ## Citations
 
