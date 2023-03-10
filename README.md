@@ -1,5 +1,9 @@
 <img src="./gigagan-sample.png" width="500px"></img>
 
+<img src="./gigagan-generator.png" width="450px"></img>
+
+<img src="./gigagan-discriminator.png" width="450px"></img>
+
 ## GigaGAN - Pytorch (wip)
 
 Implementation of <a href="https://arxiv.org/abs/2303.05511">GigaGAN</a> <a href="https://mingukkang.github.io/GigaGAN/">(project page)</a>, new SOTA GAN out of Adobe
