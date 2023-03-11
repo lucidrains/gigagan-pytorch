@@ -153,19 +153,25 @@ class StyleNetwork(nn.Module):
         self,
         dim,
         depth,
+        dim_text_latent = 0,
         frac_gradient = 0.1  # in the stylegan2 paper, they control the learning rate by multiplying the parameters by a constant, but we can use another trick here from attention literature
     ):
         super().__init__()
 
         layers = []
         for i in range(depth):
-            layers.extend([nn.Linear(dim, dim), leaky_relu()])
+            layers.extend([nn.Linear(dim + dim_text_latent, dim), leaky_relu()])
 
         self.net = nn.Sequential(*layers)
         self.frac_gradient = frac_gradient
+        self.dim_text_latent = dim_text_latent
 
-    def forward(self, x):
+    def forward(self, x, text_latent = None):
         grad_frac = self.frac_gradient
+
+        if self.dim_text_latent:
+            assert exists(text_latent)
+            x = torch.cat((x, text_latent), dim = -1)
 
         x = F.normalize(x, dim = 1)
         out = self.net(x)
