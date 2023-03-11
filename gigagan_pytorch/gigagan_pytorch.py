@@ -9,6 +9,11 @@ from einops import rearrange, pack, unpack, repeat, reduce
 def exists(val):
     return val is not None
 
+# activation functions
+
+def leaky_relu(neg_slope = 0.1):
+    return nn.LeakyReLU(neg_slope)
+
 # adaptive conv
 # the main novelty of the paper - they propose to learn a softmax weighted sum of N convolutional kernels, depending on the text embedding
 
@@ -140,6 +145,32 @@ class Attention(nn.Module):
         out = rearrange(out, '(b h) (x y) d -> b (h d) x y', x = x, y = y, h = h)
 
         return self.to_out(out)
+
+# style mapping network
+
+class StyleNetwork(nn.Module):
+    def __init__(
+        self,
+        dim,
+        depth,
+        frac_gradient = 0.1  # in the stylegan2 paper, they control the learning rate by multiplying the parameters by a constant, but we can use another trick here from attention literature
+    ):
+        super().__init__()
+
+        layers = []
+        for i in range(depth):
+            layers.extend([nn.Linear(dim, dim), leaky_relu()])
+
+        self.net = nn.Sequential(*layers)
+        self.frac_gradient = frac_gradient
+
+    def forward(self, x):
+        grad_frac = self.frac_gradient
+
+        x = F.normalize(x, dim = 1)
+        out = self.net(x)
+
+        return out * grad_frac + (1 - grad_frac) * out.detach()
 
 # gan
 
