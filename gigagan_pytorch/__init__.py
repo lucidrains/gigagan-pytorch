@@ -1,0 +1,1 @@
+from gigagan_pytorch.gigagan_pytorch import GigaGAN
