@@ -10,7 +10,7 @@ def exists(val):
     return val is not None
 
 # adaptive conv
-# the main novelty of the paper - they propose to learn a weighted average of N convolutional kernels, selected based on the incoming text embedding
+# the main novelty of the paper - they propose to learn a softmax weighted sum of N convolutional kernels, depending on the text embedding
 
 def get_same_padding(size, kernel, dilation, stride):
     return ((size - 1) * (stride - 1) + dilation * (kernel - 1)) // 2
