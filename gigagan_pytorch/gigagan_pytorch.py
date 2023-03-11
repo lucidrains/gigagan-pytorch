@@ -39,7 +39,7 @@ class AdaptiveConv2DMod(nn.Module):
         self.adaptive = num_conv_kernels > 1
 
         self.to_mod = nn.Linear(dim_embed, dim)
-        self.to_adaptive_weight = nn.Linear(dim_embed, num_conv_kernels)
+        self.to_adaptive_weight = nn.Linear(dim_embed, num_conv_kernels) if self.adaptive else None
 
         self.weights = nn.Parameter(torch.randn((num_conv_kernels, dim_out, dim, kernel, kernel)))
 
@@ -60,14 +60,17 @@ class AdaptiveConv2DMod(nn.Module):
 
         b, h = fmap.shape[0], fmap.shape[-2]
 
-        weights = repeat(self.weights, '... -> b ...', b = b)
+        weights = self.weights
 
-        # determine an adaptive weight and 'select' the kernel to use with softmax
+        if self.adaptive:
+            weights = repeat(weights, '... -> b ...', b = b)
 
-        selections = self.to_adaptive_weight(embed).softmax(dim = -1)
-        selections = rearrange(selections, 'b n -> b n 1 1 1 1')
+            # determine an adaptive weight and 'select' the kernel to use with softmax
 
-        weights = reduce(weights * selections, 'b n ... -> b ...', 'sum')
+            selections = self.to_adaptive_weight(embed).softmax(dim = -1)
+            selections = rearrange(selections, 'b n -> b n 1 1 1 1')
+
+            weights = reduce(weights * selections, 'b n ... -> b ...', 'sum')
 
         # do the modulation, demodulation, as done in stylegan2
 
