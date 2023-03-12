@@ -181,7 +181,7 @@ class CrossAttention(nn.Module):
 
         q, k, v = (self.to_q(fmap), *self.to_kv(context).chunk(2, dim = -1))
 
-        k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d'), (k, v))
+        k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h = h), (k, v))
 
         q = rearrange(q, 'b (h d) x y -> (b h) (x y) d', h = self.heads)
 
