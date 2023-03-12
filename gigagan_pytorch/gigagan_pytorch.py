@@ -14,6 +14,28 @@ def exists(val):
 def leaky_relu(neg_slope = 0.1):
     return nn.LeakyReLU(neg_slope)
 
+# rmsnorm (newer papers show mean-centering in layernorm not necessary)
+
+class ChannelRMSNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.scale = dim ** 0.5
+        self.gamma = nn.Parameter(torch.ones(dim, 1, 1))
+
+    def forward(self, x):
+        normed = F.normalize(x, dim = 1)
+        return normed * self.scale * self.gamma
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.scale = dim ** 0.5
+        self.gamma = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        normed = F.normalize(x, dim = -1)
+        return normed * self.scale * self.gamma
+
 # adaptive conv
 # the main novelty of the paper - they propose to learn a softmax weighted sum of N convolutional kernels, depending on the text embedding
 
@@ -113,6 +135,7 @@ class SelfAttention(nn.Module):
         self.scale = dim_head ** -0.5
         dim_inner = dim_head * heads
 
+        self.norm = ChannelRMSNorm(dim)
         self.to_qkv = nn.Conv2d(dim, dim_inner * 3, 1, bias = False)
         self.to_out = nn.Conv2d(dim_inner, dim, 1, bias = False)
 
@@ -128,6 +151,8 @@ class SelfAttention(nn.Module):
         i - source seq (attend from)
         j - target seq (attend to)
         """
+
+        fmap = self.norm(fmap)
 
         x, y = fmap.shape[-2:]
 
@@ -158,6 +183,9 @@ class CrossAttention(nn.Module):
         self.scale = dim_head ** -0.5
         dim_inner = dim_head * heads
 
+        self.norm = ChannelRMSNorm(dim)
+        self.norm_context = RMSNorm(dim)
+
         self.to_q = nn.Conv2d(dim, dim_inner, 1, bias = False)
         self.to_kv = nn.Linear(dim, dim_inner * 2, bias = False)
         self.to_out = nn.Conv2d(dim_inner, dim, 1, bias = False)
@@ -174,6 +202,9 @@ class CrossAttention(nn.Module):
         i - source seq (attend from)
         j - target seq (attend to)
         """
+
+        fmap = self.norm(fmap)
+        context = self.norm_context(context)
 
         x, y = fmap.shape[-2:]
 
