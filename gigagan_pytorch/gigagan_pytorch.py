@@ -2,7 +2,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn, einsum
 
+from beartype import beartype
+from beartype.typing import List
+
 from einops import rearrange, pack, unpack, repeat, reduce
+
+from gigagan_pytorch.open_clip import OpenClipAdapter
 
 # helpers
 
@@ -255,6 +260,172 @@ class CrossAttention(nn.Module):
         out = rearrange(out, '(b h) (x y) d -> b (h d) x y', x = x, y = y, h = h)
 
         return self.to_out(out)
+
+# classic transformer attention, stick with l2 distance
+
+class TextAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        mask_self_value = -1e2
+    ):
+        super().__init__()
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        dim_inner = dim_head * heads
+
+        self.mask_self_value = mask_self_value
+
+        self.norm = RMSNorm(dim)
+        self.to_qk = nn.Linear(dim, dim_inner, bias = False)
+        self.to_v = nn.Linear(dim, dim_inner, bias = False)
+
+        self.null_kv = nn.Parameter(torch.randn(2, heads, dim_head))
+
+        self.to_out = nn.Linear(dim_inner, dim, bias = False)
+
+    def forward(self, encodings, mask = None):
+        """
+        einstein notation
+
+        b - batch
+        h - heads
+        x - height
+        y - width
+        d - dimension
+        i - source seq (attend from)
+        j - target seq (attend to)
+        """
+        batch, device = encodings.shape[0], encodings.device
+
+        encodings = self.norm(encodings)
+
+        h = self.heads
+
+        qk, v = self.to_qk(encodings), self.to_v(encodings)
+        qk, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h = self.heads), (qk, v))
+
+        q, k = qk, qk
+
+        # add a null key / value, so network can choose to pay attention to nothing
+
+        nk, nv = map(lambda t: repeat(t, 'h d -> (b h) 1 d', b = batch), self.null_kv)
+
+        k = torch.cat((nk, k), dim = -2)
+        v = torch.cat((nv, v), dim = -2)
+
+        # l2 distance
+
+        sim = -torch.cdist(q, k, p = 2) * self.scale
+
+        # following what was done in reformer for shared query / key space
+        # omit attention to self
+
+        self_mask = torch.eye(sim.shape[-2], device = device, dtype = torch.bool)
+        self_mask = F.pad(self_mask, (1, 0), value = False)
+
+        sim = sim.masked_fill(self_mask, self.mask_self_value)
+
+        # key padding mask
+
+        if exists(mask):
+            mask = F.pad(mask, (1, 0), value = True)
+            mask = repeat(mask, 'b n -> (b h) 1 n', h = h)
+            sim = sim.masked_fill(~mask, -torch.finfo(sim.dtype).max)
+
+        # attention
+
+        attn = sim.softmax(dim = -1)
+        out = einsum('b i j, b j d -> b i d', attn, v)
+
+        out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
+
+        return self.to_out(out)
+
+# feedforward
+
+def FeedForward(dim, mult = 4):
+    dim_hidden = int(dim * mult)
+    return nn.Sequential(
+        RMSNorm(dim),
+        nn.Linear(dim, dim_hidden),
+        nn.GELU(),
+        nn.Linear(dim_hidden, dim)
+    )
+
+# transformer
+
+class Transformer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        depth,
+        dim_head = 64,
+        heads = 8,
+        ff_mult = 4
+    ):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                TextAttention(dim = dim, dim_head = dim_head, heads = heads),
+                FeedForward(dim = dim, mult = ff_mult)
+            ]))
+
+        self.norm = RMSNorm(dim)
+
+    def forward(self, x, mask = None):
+        for attn, ff in self.layers:
+            x = attn(x, mask = mask) + x
+            x = ff(x) + x
+
+        return self.norm(x)
+
+# text encoder
+
+@beartype
+class TextEncoder(nn.Module):
+    def __init__(
+        self,
+        *,
+        clip: OpenClipAdapter,
+        dim,
+        depth,
+        dim_head = 64,
+        heads = 8,
+    ):
+        super().__init__()
+        self.clip = clip
+        self.learned_global_token = nn.Parameter(torch.randn(dim))
+
+        self.transformer = Transformer(
+            dim = dim,
+            depth = depth,
+            dim_head = dim_head,
+            heads = heads
+        )
+
+    def forward(
+        self,
+        texts: List[str]
+    ):
+        _, text_encodings = self.clip.embed_texts(texts)
+
+        mask = (text_encodings != 0.).any(dim = -1)
+        mask_with_global = F.pad(mask, (1, 0), value = True)
+
+        batch = text_encodings.shape[0]
+        global_tokens = repeat(self.learned_global_token, 'd -> b d', b = batch)
+
+        text_encodings, ps = pack([global_tokens, text_encodings], 'b * d')
+
+        text_encodings = self.transformer(text_encodings, mask = mask_with_global)
+
+        global_tokens, text_encodings = unpack(text_encodings, ps, 'b * d')
+
+        return global_tokens, text_encodings, mask
 
 # style mapping network
 
