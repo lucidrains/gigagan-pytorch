@@ -400,6 +400,8 @@ class TextEncoder(nn.Module):
         self.clip = clip
         self.learned_global_token = nn.Parameter(torch.randn(dim))
 
+        self.project_in = nn.Linear(clip.dim_latent, dim) if clip.dim_latent != dim else nn.Identity()
+
         self.transformer = Transformer(
             dim = dim,
             depth = depth,
@@ -412,8 +414,10 @@ class TextEncoder(nn.Module):
         texts: List[str]
     ):
         _, text_encodings = self.clip.embed_texts(texts)
-
         mask = (text_encodings != 0.).any(dim = -1)
+
+        text_encodings = self.project_in(text_encodings)
+
         mask_with_global = F.pad(mask, (1, 0), value = True)
 
         batch = text_encodings.shape[0]
