@@ -142,6 +142,9 @@ class SelfAttention(nn.Module):
         self.norm = ChannelRMSNorm(dim)
         self.to_qk = nn.Conv2d(dim, dim_inner, 1, bias = False)
         self.to_v = nn.Conv2d(dim, dim_inner, 1, bias = False)
+
+        self.null_kv = nn.Parameter(torch.randn(2, heads, dim_head))
+
         self.to_out = nn.Conv2d(dim_inner, dim, 1, bias = False)
 
     def forward(self, fmap):
@@ -156,7 +159,7 @@ class SelfAttention(nn.Module):
         i - source seq (attend from)
         j - target seq (attend to)
         """
-        device = fmap.device
+        batch, device = fmap.shape[0], fmap.device
 
         fmap = self.norm(fmap)
 
@@ -167,10 +170,28 @@ class SelfAttention(nn.Module):
         qk, v = self.to_qk(fmap), self.to_v(fmap)
         qk, v = map(lambda t: rearrange(t, 'b (h d) x y -> (b h) (x y) d', h = self.heads), (qk, v))
 
-        sim = -torch.cdist(qk, qk, p = 2) * self.scale # l2 distance
+        q, k = qk, qk
 
-        self_mask = torch.eye(sim.shape[-1], device = device, dtype = torch.bool)
+        # add a null key / value, so network can choose to pay attention to nothing
+
+        nk, nv = map(lambda t: repeat(t, 'h d -> (b h) 1 d', b = batch), self.null_kv)
+
+        k = torch.cat((nk, k), dim = -2)
+        v = torch.cat((nv, v), dim = -2)
+
+        # l2 distance
+
+        sim = -torch.cdist(q, k, p = 2) * self.scale
+
+        # following what was done in reformer for shared query / key space
+        # omit attention to self
+
+        self_mask = torch.eye(sim.shape[-2], device = device, dtype = torch.bool)
+        self_mask = F.pad(self_mask, (1, 0), value = False)
+
         sim = sim.masked_fill(self_mask, self.mask_self_value)
+
+        # attention
 
         attn = sim.softmax(dim = -1)
 
