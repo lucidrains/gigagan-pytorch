@@ -121,22 +121,27 @@ class AdaptiveConv2DMod(nn.Module):
         return rearrange(fmap, '1 (b o) ... -> b o ...', b = b)
 
 # attention
-# they use an attention with a better Lipchitz constant - l2 distance similarity instead of dot product - shown in vitgan to be more stable
+# they use an attention with a better Lipchitz constant - l2 distance similarity instead of dot product - also shared query / key space - shown in vitgan to be more stable
+# not sure what they did about token attention to self, so masking out, as done in some other papers using shared query / key space
 
 class SelfAttention(nn.Module):
     def __init__(
         self,
         dim,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        mask_self_value = -1e2
     ):
         super().__init__()
         self.heads = heads
         self.scale = dim_head ** -0.5
         dim_inner = dim_head * heads
 
+        self.mask_self_value = mask_self_value
+
         self.norm = ChannelRMSNorm(dim)
-        self.to_qkv = nn.Conv2d(dim, dim_inner * 3, 1, bias = False)
+        self.to_qk = nn.Conv2d(dim, dim_inner, 1, bias = False)
+        self.to_v = nn.Conv2d(dim, dim_inner, 1, bias = False)
         self.to_out = nn.Conv2d(dim_inner, dim, 1, bias = False)
 
     def forward(self, fmap):
@@ -151,6 +156,7 @@ class SelfAttention(nn.Module):
         i - source seq (attend from)
         j - target seq (attend to)
         """
+        device = fmap.device
 
         fmap = self.norm(fmap)
 
@@ -158,10 +164,13 @@ class SelfAttention(nn.Module):
 
         h = self.heads
 
-        q, k, v = self.to_qkv(fmap).chunk(3, dim = 1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h d) x y -> (b h) (x y) d', h = self.heads), (q, k, v))
+        qk, v = self.to_qk(fmap), self.to_v(fmap)
+        qk, v = map(lambda t: rearrange(t, 'b (h d) x y -> (b h) (x y) d', h = self.heads), (qk, v))
 
-        sim = -torch.cdist(q, k, p = 2) * self.scale # l2 distance
+        sim = -torch.cdist(qk, qk, p = 2) * self.scale # l2 distance
+
+        self_mask = torch.eye(sim.shape[-1], device = device, dtype = torch.bool)
+        sim = sim.masked_fill(self_mask, self.mask_self_value)
 
         attn = sim.softmax(dim = -1)
 
