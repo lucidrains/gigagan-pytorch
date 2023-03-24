@@ -6,6 +6,8 @@
 
 Implementation of <a href="https://arxiv.org/abs/2303.05511">GigaGAN</a> <a href="https://mingukkang.github.io/GigaGAN/">(project page)</a>, new SOTA GAN out of Adobe. I may also add a few findings from <a href="https://github.com/lucidrains/lightweight-gan">lightweight gan</a>, for further stability during training.
 
+It will also contain the code for the 1k - 4k upsamplers, which I find to be the highlight of this paper.
+
 ## Appreciation
 
 - <a href="https://stability.ai/">StabilityAI</a> for the sponsorship, as well as my other sponsors, for affording me the independence to open source artificial intelligence.
