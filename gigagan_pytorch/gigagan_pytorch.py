@@ -19,7 +19,7 @@ from gigagan_pytorch.open_clip import OpenClipAdapter
 def exists(val):
     return val is not None
 
-def default(vals):
+def default(*vals):
     for val in vals:
         if exists(val):
             return val
@@ -492,13 +492,16 @@ class TextEncoder(nn.Module):
     def __init__(
         self,
         *,
-        clip: OpenClipAdapter,
         dim,
         depth,
+        clip: Optional[OpenClipAdapter] = None,
         dim_head = 64,
         heads = 8,
     ):
         super().__init__()
+        if not exists(clip):
+            clip = OpenClipAdapter()
+
         self.clip = clip
         self.learned_global_token = nn.Parameter(torch.randn(dim))
 
@@ -577,10 +580,14 @@ class Generator(nn.Module):
         *,
         dim,
         image_size,
+        dim_max = 8192,
+        style_network: Optional[StyleNetwork] = None,
         text_encoder: Optional[TextEncoder] = None,
         dim_latent = 512
     ):
         super().__init__()
+        self.dim = dim
+        self.style_network = style_network
         self.text_encoder = text_encoder
 
         assert is_power_of_two(image_size)
@@ -589,13 +596,38 @@ class Generator(nn.Module):
 
         self.init_block = nn.Parameter(torch.randn(dim_latent, 4, 4))
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+    
     def forward(
         self,
-        styles,
-        texts: Optional[List[str]] = None
+        noise = None,
+        styles = None,
+        texts: Optional[List[str]] = None,
+        global_text_tokens = None,
+        fine_text_tokens = None,
+        text_mask = None,
+        batch_size = 1
     ):
-        if exist(texts):
-            assert exists(text_encoder)
+        # take care of text encodings
+        # which requires global text tokens to adaptively select the kernels from the main contribution in the paper
+        # and fine text tokens to attend to using cross attention
+
+        if exists(texts):
+            assert exists(self.text_encoder)
+            global_text_tokens, fine_text_tokens, text_mask = self.text_encoder(texts)
+        else:
+            assert all([*map(exists, (global_text_tokens, fine_text_tokens, text_mask))])
+
+        # determine styles
+
+        if not exists(styles):
+            assert exists(self.style_network)
+            noise = default(noise, torch.randn((batch_size, self.dim), device = self.device))
+            styles = self.style_network(noise)
+
+        # main network
 
         return styles
 
@@ -627,6 +659,8 @@ class Discriminator(nn.Module):
 
         dim_layers = (2 ** (torch.arange(num_layers) + 1)) * capacity
         dim_layers = F.pad(dim_layers, (1, 0), value = channels)
+        dim_layers.clamp_(max = dim_max)
+
         dim_layers = dim_layers.tolist()
         dim_last = dim_layers[-1]
         dim_pairs = list(zip(dim_layers[:-1], dim_layers[1:]))
