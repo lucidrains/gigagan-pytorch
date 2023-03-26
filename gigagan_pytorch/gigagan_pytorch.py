@@ -7,9 +7,10 @@ from torch import nn, einsum
 from torch.autograd import grad as torch_grad
 
 from beartype import beartype
-from beartype.typing import List
+from beartype.typing import List, Optional, Tuple
 
 from einops import rearrange, pack, unpack, repeat, reduce
+from einops.layers.torch import Rearrange
 
 from gigagan_pytorch.open_clip import OpenClipAdapter
 
@@ -24,10 +25,16 @@ def default(vals):
             return val
     return None
 
+def is_power_of_two(n):
+    return log2(n).is_integer()
+
 # activation functions
 
 def leaky_relu(neg_slope = 0.1):
     return nn.LeakyReLU(neg_slope)
+
+def conv2d_3x3(dim_in, dim_out):
+    return nn.Conv2d(dim_in, dim_out, 3, padding = 1)
 
 # tensor helpers
 
@@ -82,10 +89,9 @@ class RMSNorm(nn.Module):
 # down and upsample
 
 class Upsample(nn.Module):
-    def __init__(self, dim, dim_out = None):
+    def __init__(self, dim):
         super().__init__()
-        dim_out = default(dim_out, dim)
-        conv = nn.Conv2d(dim, dim_out * 4, 1)
+        conv = nn.Conv2d(dim, dim * 4, 1)
 
         self.net = nn.Sequential(
             conv,
@@ -107,11 +113,10 @@ class Upsample(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-def Downsample(dim, dim_out = None):
-    dim_out = default(dim_out, dim)
+def Downsample(dim):
     return nn.Sequential(
         Rearrange('b c (h s1) (w s2) -> b (c s1 s2) h w', s1 = 2, s2 = 2),
-        nn.Conv2d(dim * 4, dim_out, 1)
+        nn.Conv2d(dim * 4, dim, 1)
     )
 
 # adaptive conv
@@ -435,7 +440,24 @@ def FeedForward(
         proj(dim_hidden, dim)
     )
 
-# transformer
+# different types of transformer blocks or transformers (multiple blocks)
+
+class SelfAttentionBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        ff_mult = 4
+    ):
+        super().__init__()
+        self.attn = SelfAttention(dim = dim, dim_head = dim_head, heads = heads)
+        self.ff = FeedForward(dim = dim, mult = ff_mult, channel_first = True)
+
+    def forward(self, x):
+        x = self.attn(x) + x
+        x = self.ff(x) + x
+        return x
 
 class Transformer(nn.Module):
     def __init__(
@@ -554,15 +576,27 @@ class Generator(nn.Module):
         self,
         *,
         dim,
-        dim_latent,
+        image_size,
+        text_encoder: Optional[TextEncoder] = None,
+        dim_latent = 512
     ):
         super().__init__()
+        self.text_encoder = text_encoder
+
+        assert is_power_of_two(image_size)
+        num_layers = int(log2(image_size) - 1)
+        self.num_layers = num_layers
+
         self.init_block = nn.Parameter(torch.randn(dim_latent, 4, 4))
 
     def forward(
         self,
-        styles
+        styles,
+        texts: Optional[List[str]] = None
     ):
+        if exist(texts):
+            assert exists(text_encoder)
+
         return styles
 
 # discriminator
@@ -572,14 +606,84 @@ class Discriminator(nn.Module):
         self,
         *,
         dim,
+        image_size,
+        capacity = 16,
+        dim_max = 8192,
+        channels = 3,
+        attn_resolutions: Tuple[int] = (32, 16),
+        attn_dim_head = 64,
+        attn_heads = 8,
+        ff_mult = 4
     ):
         super().__init__()
+        assert is_power_of_two(image_size)
+        assert all([*map(is_power_of_two, attn_resolutions)])
+
+        num_layers = int(log2(image_size) - 1)
+        self.num_layers = num_layers
+
+        resolutions = image_size / ((2 ** torch.arange(num_layers)))
+        resolutions = resolutions.long().tolist()
+
+        dim_layers = (2 ** (torch.arange(num_layers) + 1)) * capacity
+        dim_layers = F.pad(dim_layers, (1, 0), value = channels)
+        dim_layers = dim_layers.tolist()
+        dim_last = dim_layers[-1]
+        dim_pairs = list(zip(dim_layers[:-1], dim_layers[1:]))
+
+        self.residual_scale = 2 ** -0.5
+        self.layers = nn.ModuleList([])
+
+        for ind, ((dim_in, dim_out), resolution) in enumerate(zip(dim_pairs, resolutions)):
+            is_first = ind == 0
+            is_last = (ind + 1) == len(dim_pairs)
+            should_downsample = not is_last
+            has_attn = resolution in attn_resolutions
+
+            residual_conv = nn.Conv2d(dim_in, dim_out, 1, stride = (2 if should_downsample else 1))
+
+            resnet_block = nn.Sequential(
+                conv2d_3x3(dim_in, dim_out),
+                leaky_relu(),
+                conv2d_3x3(dim_out, dim_out),
+                leaky_relu()
+            )
+
+            self.layers.append(nn.ModuleList([
+                resnet_block,
+                residual_conv,
+                SelfAttentionBlock(dim_out, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult) if has_attn else None,
+                Downsample(dim_out) if should_downsample else None,
+            ]))
+
+        self.to_logits = nn.Sequential(
+            conv2d_3x3(dim_last, dim_last),
+            Rearrange('b c h w -> b (c h w)'),
+            nn.Linear(dim_last * (4 ** 2), 1),
+            Rearrange('b 1 -> b')
+        )
 
     def forward(
         self,
-        images
+        images,
+        texts: Optional[List[str]] = None
     ):
-        return images
+        x = images
+
+        for block, residual_fn, attn, downsample in self.layers:
+            residual = residual_fn(x)
+            x = block(x)
+
+            if exists(attn):
+                x = attn(x)
+
+            if exists(downsample):
+                x = downsample(x)
+
+            x = x + residual
+            x = x * self.residual_scale
+
+        return self.to_logits(x)
 
 # gan
 
