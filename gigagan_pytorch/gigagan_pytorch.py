@@ -1,6 +1,9 @@
+from math import log2
+
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
+from torch.autograd import grad as torch_grad
 
 from beartype import beartype
 from beartype.typing import List
@@ -14,10 +17,44 @@ from gigagan_pytorch.open_clip import OpenClipAdapter
 def exists(val):
     return val is not None
 
+def default(vals):
+    for val in vals:
+        if exists(val):
+            return val
+    return None
+
 # activation functions
 
 def leaky_relu(neg_slope = 0.1):
     return nn.LeakyReLU(neg_slope)
+
+# tensor helpers
+
+def gradient_penalty(
+    images,
+    output,
+    weight = 10
+):
+    batch_size = images.shape[0]
+    gradients, *_ = torch_grad(
+        outputs = output,
+        inputs = images,
+        grad_outputs = torch.ones_like(output),
+        create_graph = True,
+        retain_graph = True,
+        only_inputs = True
+    )
+
+    gradients = rearrange(gradients, 'b ... -> b (...)')
+    return weight * ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+
+# hinge gan losses
+
+def gen_hinge_loss(fake):
+    return fake.mean()
+
+def hinge_loss(real, fake):
+    return (F.relu(1 + real) + F.relu(1 - fake)).mean()
 
 # rmsnorm (newer papers show mean-centering in layernorm not necessary)
 
@@ -40,6 +77,41 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         normed = F.normalize(x, dim = -1)
         return normed * self.scale * self.gamma
+
+# down and upsample
+
+class Upsample(nn.Module):
+    def __init__(self, dim, dim_out = None):
+        super().__init__()
+        dim_out = default(dim_out, dim)
+        conv = nn.Conv2d(dim, dim_out * 4, 1)
+
+        self.net = nn.Sequential(
+            conv,
+            nn.SiLU(),
+            nn.PixelShuffle(2)
+        )
+
+        self.init_conv_(conv)
+
+    def init_conv_(self, conv):
+        o, i, h, w = conv.weight.shape
+        conv_weight = torch.empty(o // 4, i, h, w)
+        nn.init.kaiming_uniform_(conv_weight)
+        conv_weight = repeat(conv_weight, 'o ... -> (o 4) ...')
+
+        conv.weight.data.copy_(conv_weight)
+        nn.init.zeros_(conv.bias.data)
+
+    def forward(self, x):
+        return self.net(x)
+
+def Downsample(dim, dim_out = None):
+    dim_out = default(dim_out, dim)
+    return nn.Sequential(
+        Rearrange('b c (h s1) (w s2) -> b (c s1 s2) h w', s1 = 2, s2 = 2),
+        nn.Conv2d(dim * 4, dim_out, 1)
+    )
 
 # adaptive conv
 # the main novelty of the paper - they propose to learn a softmax weighted sum of N convolutional kernels, depending on the text embedding
@@ -462,6 +534,40 @@ class StyleNetwork(nn.Module):
         out = self.net(x)
 
         return out * grad_frac + (1 - grad_frac) * out.detach()
+
+# generator
+
+class Generator(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        dim_latent,
+    ):
+        super().__init__()
+        self.init_block = nn.Parameter(torch.randn(dim_latent, 4, 4))
+
+    def forward(
+        self,
+        styles
+    ):
+        return styles
+
+# discriminator
+
+class Discriminator(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+    ):
+        super().__init__()
+
+    def forward(
+        self,
+        images
+    ):
+        return images
 
 # gan
 
