@@ -1,4 +1,5 @@
 from math import log2
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -418,13 +419,20 @@ class TextAttention(nn.Module):
 
 # feedforward
 
-def FeedForward(dim, mult = 4):
+def FeedForward(
+    dim,
+    mult = 4,
+    channel_first = False
+):
     dim_hidden = int(dim * mult)
+    norm_klass = ChannelRMSNorm if channel_first else RMSNorm
+    proj = partial(nn.Conv2d, kernel_size = 1) if channel_first else nn.Linear
+
     return nn.Sequential(
-        RMSNorm(dim),
-        nn.Linear(dim, dim_hidden),
+        norm_klass(dim),
+        proj(dim, dim_hidden),
         nn.GELU(),
-        nn.Linear(dim_hidden, dim)
+        proj(dim_hidden, dim)
     )
 
 # transformer
@@ -523,7 +531,11 @@ class StyleNetwork(nn.Module):
         self.frac_gradient = frac_gradient
         self.dim_text_latent = dim_text_latent
 
-    def forward(self, x, text_latent = None):
+    def forward(
+        self,
+        x,
+        text_latent = None
+    ):
         grad_frac = self.frac_gradient
 
         if self.dim_text_latent:
@@ -571,8 +583,14 @@ class Discriminator(nn.Module):
 
 # gan
 
+@beartype
 class GigaGAN(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        generator: Generator,
+        discriminator: Discriminator
+    ):
         super().__init__()
 
     def forward(self, x):
