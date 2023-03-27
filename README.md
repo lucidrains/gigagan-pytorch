@@ -32,13 +32,11 @@ It will also contain the code for the 1k - 4k upsamplers, which I find to be the
 ```
 
 ```bibtex
-@inproceedings{
-    anonymous2021towards,
-    title   = {Towards Faster and Stabilized {\{}GAN{\}} Training for High-fidelity Few-shot Image Synthesis},
-    author  = {Anonymous},
-    booktitle = {Submitted to International Conference on Learning Representations},
+@article{Liu2021TowardsFA,
+    title   = {Towards Faster and Stabilized GAN Training for High-fidelity Few-shot Image Synthesis},
+    author  = {Bingchen Liu and Yizhe Zhu and Kunpeng Song and A. Elgammal},
+    journal = {ArXiv},
     year    = {2021},
-    url     = {https://openreview.net/forum?id=1Fqg133qRaI},
-    note    = {under review}
+    volume  = {abs/2101.04775}
 }
 ```
