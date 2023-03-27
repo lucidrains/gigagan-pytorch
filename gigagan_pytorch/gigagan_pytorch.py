@@ -800,6 +800,36 @@ class Generator(nn.Module):
 
 # discriminator
 
+class Predictor(nn.Module):
+    def __init__(
+        self,
+        dim,
+        depth = 4,
+        num_conv_kernels = 2
+    ):
+        super().__init__()
+        self.residual_fn = nn.Conv2d(dim, dim, 1)
+        self.layers = nn.ModuleList([])
+
+        for ind in range(depth):
+            self.layers.append(AdaptiveConv2DMod(dim, dim, 1, num_conv_kernels = num_conv_kernels))
+
+        self.to_logits = nn.Conv2d(dim, 1, 1)
+
+    def forward(
+        self,
+        x,
+        mod,
+        kernel_mod = None
+    ):
+        residual = self.residual_fn(x)
+
+        for layer in self.layers:
+            x = layer(x, mod = mod, kernel_mod = kernel_mod)
+
+        x = x + residual
+        return self.to_logits(x)
+
 class Discriminator(nn.Module):
     def __init__(
         self,
@@ -813,8 +843,12 @@ class Discriminator(nn.Module):
         attn_dim_head = 64,
         attn_heads = 8,
         ff_mult = 4,
-        multiscale_input_resolutions: Tuple[int] = (64, 32, 16, 8, 4),
-        resize_mode = 'bilinear'
+        text_encoder: Optional[TextEncoder] = None,
+        text_dim = None,
+        multiscale_input_resolutions: Tuple[int] = (64, 32, 16, 8),
+        multiscale_output_resolutions: Tuple[int] = (32, 16, 8, 4),
+        resize_mode = 'bilinear',
+        num_conv_kernels = 2
     ):
         super().__init__()
         assert is_power_of_two(image_size)
@@ -823,6 +857,15 @@ class Discriminator(nn.Module):
         assert all([*map(is_power_of_two, multiscale_input_resolutions)])
         assert all([*map(lambda t: t >= 4, multiscale_input_resolutions)])
         self.multiscale_input_resolutions = multiscale_input_resolutions
+
+        assert all([*map(is_power_of_two, multiscale_output_resolutions)])
+        assert all([*map(lambda t: t >= 4, multiscale_output_resolutions)])
+
+        assert max(multiscale_input_resolutions) > max(multiscale_output_resolutions)
+        assert min(multiscale_input_resolutions) > min(multiscale_output_resolutions)
+
+        self.multiscale_output_resolutions = multiscale_output_resolutions
+
         self.resize_mode = resize_mode
 
         num_layers = int(log2(image_size) - 1)
@@ -842,6 +885,9 @@ class Discriminator(nn.Module):
         self.residual_scale = 2 ** -0.5
         self.layers = nn.ModuleList([])
 
+        predictor_dims = []
+        dim_kernel_attn = (num_conv_kernels if num_conv_kernels > 1 else 0)
+
         for ind, ((dim_in, dim_out), resolution) in enumerate(zip(dim_pairs, resolutions)):
             is_first = ind == 0
             is_last = (ind + 1) == len(dim_pairs)
@@ -849,6 +895,7 @@ class Discriminator(nn.Module):
 
             has_attn = resolution in attn_resolutions
             has_multiscale_input = resolution in multiscale_input_resolutions
+            has_multiscale_output = resolution in multiscale_output_resolutions
 
             dim_in = dim_in + (channels if has_multiscale_input else 0)
 
@@ -861,10 +908,16 @@ class Discriminator(nn.Module):
                 leaky_relu()
             )
 
+            multiscale_output_predictor = None
+            if has_multiscale_output:
+                multiscale_output_predictor = Predictor(dim_out, num_conv_kernels = num_conv_kernels)
+                predictor_dims.extend([dim_out, dim_kernel_attn])
+
             self.layers.append(nn.ModuleList([
                 resnet_block,
                 residual_conv,
                 SelfAttentionBlock(dim_out, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult) if has_attn else None,
+                multiscale_output_predictor,
                 Downsample(dim_out) if should_downsample else None,
             ]))
 
@@ -875,17 +928,36 @@ class Discriminator(nn.Module):
             Rearrange('b 1 -> b')
         )
 
+        # take care of text conditioning in the multiscale predictor branches
+
+        assert exists(text_dim) ^ exists(text_encoder)
+        self.text_encoder = text_encoder
+        self.text_dim = default(text_dim, text_encoder.dim)
+        self.predictor_dims = predictor_dims
+
+        self.text_to_conv_conditioning = nn.Linear(self.text_dim, sum(predictor_dims))
+
     def forward(
         self,
         images,
         texts: Optional[List[str]] = None,
+        text_embeds = None,
         return_layer_fmaps = False
     ):
+        assert exists(texts) ^ exists(text_embeds)
+
+        if exists(texts):
+            assert exists(self.text_encoder)
+            text_embeds, *_ = self.text_encoder(texts)
+
+        conv_mods = self.text_to_conv_conditioning(text_embeds).split(self.predictor_dims, dim = -1)
+        conv_mods = iter(conv_mods)
+
         x = images
 
-        layer_fmaps = []
+        multiscale_outputs = []
 
-        for block, residual_fn, attn, downsample in self.layers:
+        for block, residual_fn, attn, predictor, downsample in self.layers:
             resolution = x.shape[-1]
 
             if resolution in self.multiscale_input_resolutions:
@@ -898,13 +970,14 @@ class Discriminator(nn.Module):
             if exists(attn):
                 x = attn(x)
 
+            if exists(predictor):
+                multiscale_outputs.append(predictor(x, mod = next(conv_mods), kernel_mod = next(conv_mods)))
+
             if exists(downsample):
                 x = downsample(x)
 
             x = x + residual
             x = x * self.residual_scale
-
-            layer_fmaps.append(x)
 
         logits = self.to_logits(x)
 
