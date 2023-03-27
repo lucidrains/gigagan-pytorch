@@ -812,11 +812,18 @@ class Discriminator(nn.Module):
         attn_resolutions: Tuple[int] = (32, 16),
         attn_dim_head = 64,
         attn_heads = 8,
-        ff_mult = 4
+        ff_mult = 4,
+        multiscale_input_resolutions: Tuple[int] = (64, 32, 16, 8, 4),
+        resize_mode = 'bilinear'
     ):
         super().__init__()
         assert is_power_of_two(image_size)
         assert all([*map(is_power_of_two, attn_resolutions)])
+
+        assert all([*map(is_power_of_two, multiscale_input_resolutions)])
+        assert all([*map(lambda t: t >= 4, multiscale_input_resolutions)])
+        self.multiscale_input_resolutions = multiscale_input_resolutions
+        self.resize_mode = resize_mode
 
         num_layers = int(log2(image_size) - 1)
         self.num_layers = num_layers
@@ -839,7 +846,11 @@ class Discriminator(nn.Module):
             is_first = ind == 0
             is_last = (ind + 1) == len(dim_pairs)
             should_downsample = not is_last
+
             has_attn = resolution in attn_resolutions
+            has_multiscale_input = resolution in multiscale_input_resolutions
+
+            dim_in = dim_in + (channels if has_multiscale_input else 0)
 
             residual_conv = nn.Conv2d(dim_in, dim_out, 1, stride = (2 if should_downsample else 1))
 
@@ -875,6 +886,12 @@ class Discriminator(nn.Module):
         layer_fmaps = []
 
         for block, residual_fn, attn, downsample in self.layers:
+            resolution = x.shape[-1]
+
+            if resolution in self.multiscale_input_resolutions:
+                resized_images = F.interpolate(images, resolution, mode = self.resize_mode)
+                x = torch.cat((resized_images, x), dim = 1)
+
             residual = residual_fn(x)
             x = block(x)
 
