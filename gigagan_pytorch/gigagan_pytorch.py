@@ -288,6 +288,7 @@ class CrossAttention(nn.Module):
     def __init__(
         self,
         dim,
+        dim_context,
         dim_head = 64,
         heads = 8
     ):
@@ -295,15 +296,16 @@ class CrossAttention(nn.Module):
         self.heads = heads
         self.scale = dim_head ** -0.5
         dim_inner = dim_head * heads
+        kv_input_dim = default(dim_context, dim)
 
         self.norm = ChannelRMSNorm(dim)
-        self.norm_context = RMSNorm(dim)
+        self.norm_context = RMSNorm(kv_input_dim)
 
         self.to_q = nn.Conv2d(dim, dim_inner, 1, bias = False)
-        self.to_kv = nn.Linear(dim, dim_inner * 2, bias = False)
+        self.to_kv = nn.Linear(kv_input_dim, dim_inner * 2, bias = False)
         self.to_out = nn.Conv2d(dim_inner, dim, 1, bias = False)
 
-    def forward(self, fmap, context):
+    def forward(self, fmap, context, mask = None):
         """
         einstein notation
 
@@ -330,6 +332,10 @@ class CrossAttention(nn.Module):
         q = rearrange(q, 'b (h d) x y -> (b h) (x y) d', h = self.heads)
 
         sim = -torch.cdist(q, k, p = 2) * self.scale # l2 distance
+
+        if exists(mask):
+            mask = repeat(mask, 'b j -> (b h) 1 j', h = self.heads)
+            sim = sim.masked_fill(~mask, -torch.finfo(sim.dtype).max)
 
         attn = sim.softmax(dim = -1)
 
@@ -459,6 +465,24 @@ class SelfAttentionBlock(nn.Module):
         x = self.ff(x) + x
         return x
 
+class CrossAttentionBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_context,
+        dim_head = 64,
+        heads = 8,
+        ff_mult = 4
+    ):
+        super().__init__()
+        self.attn = CrossAttention(dim = dim, dim_context = dim_context, dim_head = dim_head, heads = heads)
+        self.ff = FeedForward(dim = dim, mult = ff_mult, channel_first = True)
+
+    def forward(self, x, context, mask = None):
+        x = self.attn(x, context = context, mask = mask) + x
+        x = self.ff(x) + x
+        return x
+
 class Transformer(nn.Module):
     def __init__(
         self,
@@ -499,6 +523,8 @@ class TextEncoder(nn.Module):
         heads = 8,
     ):
         super().__init__()
+        self.dim = dim
+
         if not exists(clip):
             clip = OpenClipAdapter()
 
@@ -547,6 +573,7 @@ class StyleNetwork(nn.Module):
         frac_gradient = 0.1  # in the stylegan2 paper, they control the learning rate by multiplying the parameters by a constant, but we can use another trick here from attention literature
     ):
         super().__init__()
+        self.dim = dim
 
         layers = []
         for i in range(depth):
@@ -581,12 +608,24 @@ class Generator(nn.Module):
         dim,
         image_size,
         dim_max = 8192,
+        capacity = 16,
+        channels = 3,
         style_network: Optional[StyleNetwork] = None,
         text_encoder: Optional[TextEncoder] = None,
-        dim_latent = 512
+        dim_latent = 512,
+        self_attn_resolutions: Tuple[int] = (32, 16),
+        self_attn_dim_head = 64,
+        self_attn_heads = 8,
+        self_ff_mult = 4,
+        cross_attn_resolutions: Tuple[int] = (32, 16),
+        cross_attn_dim_head = 64,
+        cross_attn_heads = 8,
+        cross_ff_mult = 4
     ):
         super().__init__()
         self.dim = dim
+        self.channels = channels
+
         self.style_network = style_network
         self.text_encoder = text_encoder
 
@@ -595,6 +634,64 @@ class Generator(nn.Module):
         self.num_layers = num_layers
 
         self.init_block = nn.Parameter(torch.randn(dim_latent, 4, 4))
+
+        # main network
+
+        num_layers = int(log2(image_size) - 1)
+        self.num_layers = num_layers
+
+        resolutions = image_size / ((2 ** torch.arange(num_layers)))
+        resolutions = resolutions.long().tolist()
+
+        dim_layers = (2 ** (torch.arange(num_layers) + 1)) * capacity
+        dim_layers.clamp_(max = dim_max)
+
+        dim_layers = torch.flip(dim_layers, (0,))
+        dim_layers = F.pad(dim_layers, (1, 0), value = dim_latent)
+
+        dim_layers = dim_layers.tolist()
+        dim_last = dim_layers[-1]
+        dim_pairs = list(zip(dim_layers[:-1], dim_layers[1:]))
+
+        self.layers = nn.ModuleList([])
+
+        for ind, ((dim_in, dim_out), resolution) in enumerate(zip(dim_pairs, resolutions)):
+            is_first = ind == 0
+            is_last = (ind + 1) == len(dim_pairs)
+            should_upsample = not is_last
+
+            has_self_attn = resolution in self_attn_resolutions
+            has_cross_attn = resolution in cross_attn_resolutions
+
+            resnet_block = nn.Sequential(
+                conv2d_3x3(dim_in, dim_out),
+                leaky_relu(),
+                conv2d_3x3(dim_out, dim_out),
+                leaky_relu()
+            )
+
+            to_rgb = conv2d_3x3(dim_out, channels)
+
+            self_attn = cross_attn = rgb_upsample = upsample = None
+
+            if should_upsample:
+                upsample = Upsample(dim_out)
+                rgb_upsample = Upsample(channels)
+
+            if has_self_attn:
+                self_attn = SelfAttentionBlock(dim_out)
+
+            if has_cross_attn:
+                cross_attn = CrossAttentionBlock(dim_out, dim_context = text_encoder.dim)
+
+            self.layers.append(nn.ModuleList([
+                resnet_block,
+                to_rgb,
+                self_attn,
+                cross_attn,
+                upsample,
+                rgb_upsample
+            ]))
 
     @property
     def device(self):
@@ -627,9 +724,35 @@ class Generator(nn.Module):
             noise = default(noise, torch.randn((batch_size, self.dim), device = self.device))
             styles = self.style_network(noise)
 
+        # prepare initial block
+
+        batch_size = styles.shape[0]
+
+        x = repeat(self.init_block, 'c h w -> b c h w', b = batch_size)
+
+        rgb = torch.zeros((batch_size, self.channels, 4, 4), device = self.device, dtype = x.dtype)
+
         # main network
 
-        return styles
+        for block, to_rgb_conv, self_attn, cross_attn, upsample, upsample_rgb in self.layers:
+
+            x = block(x)
+
+            if exists(self_attn):
+                x = self_attn(x)
+
+            if exists(cross_attn):
+                x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
+
+            rgb = rgb + to_rgb_conv(x)
+
+            if exists(upsample):
+                x = upsample(x)
+
+            if exists(upsample_rgb):
+                rgb = upsample_rgb(rgb)
+
+        return rgb
 
 # discriminator
 
