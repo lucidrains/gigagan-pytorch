@@ -132,7 +132,6 @@ class AdaptiveConv2DMod(nn.Module):
         dim_out,
         kernel,
         *,
-        dim_embed,
         demod = True,
         stride = 1,
         dilation = 1,
@@ -149,16 +148,18 @@ class AdaptiveConv2DMod(nn.Module):
         self.dilation = dilation
         self.adaptive = num_conv_kernels > 1
 
-        self.to_mod = nn.Linear(dim_embed, dim)
-        self.to_adaptive_weight = nn.Linear(dim_embed, num_conv_kernels) if self.adaptive else None
-
         self.weights = nn.Parameter(torch.randn((num_conv_kernels, dim_out, dim, kernel, kernel)))
 
         self.demod = demod
 
         nn.init.kaiming_normal_(self.weights, a = 0, mode = 'fan_in', nonlinearity = 'leaky_relu')
 
-    def forward(self, fmap, embed):
+    def forward(
+        self,
+        fmap,
+        mod: Optional[torch.Tensor] = None,
+        kernel_mod: Optional[torch.Tensor] = None
+    ):
         """
         notation
 
@@ -178,14 +179,14 @@ class AdaptiveConv2DMod(nn.Module):
 
             # determine an adaptive weight and 'select' the kernel to use with softmax
 
-            selections = self.to_adaptive_weight(embed).softmax(dim = -1)
-            selections = rearrange(selections, 'b n -> b n 1 1 1 1')
+            assert exists(kernel_mod)
 
-            weights = reduce(weights * selections, 'b n ... -> b ...', 'sum')
+            kernel_attn = kernel_mod.softmax(dim = -1)
+            kernel_attn = rearrange(kernel_attn, 'b n -> b n 1 1 1 1')
+
+            weights = reduce(weights * kernel_attn, 'b n ... -> b ...', 'sum')
 
         # do the modulation, demodulation, as done in stylegan2
-
-        mod = self.to_mod(embed)
 
         mod = rearrange(mod, 'b i -> b 1 i 1 1')
 
@@ -624,7 +625,8 @@ class Generator(nn.Module):
         cross_attn_resolutions: Tuple[int] = (32, 16),
         cross_attn_dim_head = 64,
         cross_attn_heads = 8,
-        cross_ff_mult = 4
+        cross_ff_mult = 4,
+        num_conv_kernels = 2  # the number of adaptive conv kernels
     ):
         super().__init__()
         self.dim = dim
@@ -659,6 +661,18 @@ class Generator(nn.Module):
 
         self.layers = nn.ModuleList([])
 
+        # generator requires convolutions conditioned by the style vector
+        # and also has N convolutional kernels adaptively selected (one of the only novelties of the paper)
+
+        is_adaptive = num_conv_kernels > 1
+        dim_kernel_mod = num_conv_kernels if is_adaptive else 0
+
+        style_embed_split_dims = []
+
+        adaptive_conv = partial(AdaptiveConv2DMod, kernel = 3, num_conv_kernels = num_conv_kernels)
+
+        # go through layers and construct all parameters
+
         for ind, ((dim_in, dim_out), resolution) in enumerate(zip(dim_pairs, resolutions)):
             is_first = ind == 0
             is_last = (ind + 1) == len(dim_pairs)
@@ -667,14 +681,14 @@ class Generator(nn.Module):
             has_self_attn = resolution in self_attn_resolutions
             has_cross_attn = resolution in cross_attn_resolutions
 
-            resnet_block = nn.Sequential(
-                conv2d_3x3(dim_in, dim_out),
+            resnet_block = nn.ModuleList([
+                adaptive_conv(dim_in, dim_out),
                 leaky_relu(),
-                conv2d_3x3(dim_out, dim_out),
+                adaptive_conv(dim_out, dim_out),
                 leaky_relu()
-            )
+            ])
 
-            to_rgb = conv2d_3x3(dim_out, channels)
+            to_rgb = adaptive_conv(dim_out, channels)
 
             self_attn = cross_attn = rgb_upsample = upsample = None
 
@@ -688,6 +702,15 @@ class Generator(nn.Module):
             if has_cross_attn:
                 cross_attn = CrossAttentionBlock(dim_out, dim_context = text_encoder.dim)
 
+            style_embed_split_dims.extend([
+                dim_in,             # for first conv in resnet block
+                dim_kernel_mod,     # first conv kernel selection
+                dim_out,            # second conv in resnet block
+                dim_kernel_mod,     # second conv kernel selection
+                dim_out,            # to RGB conv
+                dim_kernel_mod,     # RGB conv kernel selection
+            ])
+
             self.layers.append(nn.ModuleList([
                 resnet_block,
                 to_rgb,
@@ -696,6 +719,11 @@ class Generator(nn.Module):
                 upsample,
                 rgb_upsample
             ]))
+
+        # determine the projection of the style embedding to convolutional modulation weights (+ adaptive kernel selection weights) for all layers
+
+        self.style_to_conv_modulations = nn.Linear(style_network.dim, sum(style_embed_split_dims))
+        self.style_embed_split_dims = style_embed_split_dims
 
     @property
     def device(self):
@@ -728,6 +756,12 @@ class Generator(nn.Module):
             noise = default(noise, torch.randn((batch_size, self.dim), device = self.device))
             styles = self.style_network(noise, global_text_tokens)
 
+        # project styles to conv modulations
+
+        conv_mods = self.style_to_conv_modulations(styles)
+        conv_mods = conv_mods.split(self.style_embed_split_dims, dim = -1)
+        conv_mods = iter(conv_mods)
+
         # prepare initial block
 
         batch_size = styles.shape[0]
@@ -738,9 +772,12 @@ class Generator(nn.Module):
 
         # main network
 
-        for block, to_rgb_conv, self_attn, cross_attn, upsample, upsample_rgb in self.layers:
+        for (resnet_conv1, act1, resnet_conv2, act2), to_rgb_conv, self_attn, cross_attn, upsample, upsample_rgb in self.layers:
 
-            x = block(x)
+            x = resnet_conv1(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
+            x = act1(x)
+            x = resnet_conv2(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
+            x = act2(x)
 
             if exists(self_attn):
                 x = self_attn(x)
@@ -748,7 +785,7 @@ class Generator(nn.Module):
             if exists(cross_attn):
                 x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
 
-            rgb = rgb + to_rgb_conv(x)
+            rgb = rgb + to_rgb_conv(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
 
             if exists(upsample):
                 x = upsample(x)
