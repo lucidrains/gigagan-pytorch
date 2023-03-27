@@ -941,8 +941,7 @@ class Discriminator(nn.Module):
         self,
         images,
         texts: Optional[List[str]] = None,
-        text_embeds = None,
-        return_layer_fmaps = False
+        text_embeds = None
     ):
         assert exists(texts) ^ exists(text_embeds)
 
@@ -979,12 +978,9 @@ class Discriminator(nn.Module):
             x = x + residual
             x = x * self.residual_scale
 
-        logits = self.to_logits(x)
+        logits = self.to_logits(x)   
 
-        if not return_layer_fmaps:
-            return logits
-
-        return logits, layer_fmaps
+        return logits, multiscale_outputs
 
 # gan
 
