@@ -130,8 +130,9 @@ class AdaptiveConv2DMod(nn.Module):
         self,
         dim,
         dim_out,
-        dim_embed,
         kernel,
+        *,
+        dim_embed,
         demod = True,
         stride = 1,
         dilation = 1,
@@ -577,7 +578,10 @@ class StyleNetwork(nn.Module):
 
         layers = []
         for i in range(depth):
-            layers.extend([nn.Linear(dim + dim_text_latent, dim), leaky_relu()])
+            is_first = i == 0
+
+            dim_in = dim + (dim_text_latent if is_first else 0)
+            layers.extend([nn.Linear(dim_in, dim), leaky_relu()])
 
         self.net = nn.Sequential(*layers)
         self.frac_gradient = frac_gradient
@@ -722,7 +726,7 @@ class Generator(nn.Module):
         if not exists(styles):
             assert exists(self.style_network)
             noise = default(noise, torch.randn((batch_size, self.dim), device = self.device))
-            styles = self.style_network(noise)
+            styles = self.style_network(noise, global_text_tokens)
 
         # prepare initial block
 
