@@ -546,7 +546,10 @@ class TextEncoder(nn.Module):
         self,
         texts: List[str]
     ):
-        _, text_encodings = self.clip.embed_texts(texts)
+        with torch.no_grad():
+            self.clip.eval()
+            _, text_encodings = self.clip.embed_texts(texts)
+
         mask = (text_encodings != 0.).any(dim = -1)
 
         text_encodings = self.project_in(text_encodings)
