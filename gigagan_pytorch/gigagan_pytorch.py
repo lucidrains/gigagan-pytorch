@@ -867,9 +867,12 @@ class Discriminator(nn.Module):
     def forward(
         self,
         images,
-        texts: Optional[List[str]] = None
+        texts: Optional[List[str]] = None,
+        return_layer_fmaps = False
     ):
         x = images
+
+        layer_fmaps = []
 
         for block, residual_fn, attn, downsample in self.layers:
             residual = residual_fn(x)
@@ -884,7 +887,14 @@ class Discriminator(nn.Module):
             x = x + residual
             x = x * self.residual_scale
 
-        return self.to_logits(x)
+            layer_fmaps.append(x)
+
+        logits = self.to_logits(x)
+
+        if not return_layer_fmaps:
+            return logits
+
+        return logits, layer_fmaps
 
 # gan
 
