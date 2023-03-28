@@ -10,6 +10,8 @@ I will also add a few findings from <a href="https://github.com/lucidrains/light
 
 It will also contain the code for the 1k - 4k upsamplers, which I find to be the highlight of this paper.
 
+Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord" src="https://img.shields.io/discord/823813159592001537?color=5865F2&logo=discord&logoColor=white"></a> if you are interested in helping out with the replication with the <a href="https://laion.ai/">LAION</a> community
+
 ## Appreciation
 
 - <a href="https://stability.ai/">StabilityAI</a> for the sponsorship, as well as my other sponsors, for affording me the independence to open source artificial intelligence.
@@ -17,6 +19,17 @@ It will also contain the code for the 1k - 4k upsamplers, which I find to be the
 - <a href="https://huggingface.co/">🤗 Huggingface</a> for their accelerate library
 
 - All the maintainers at <a href="https://github.com/mlfoundations/open_clip">OpenClip</a>, for their SOTA open sourced contrastive learning text-image models
+
+## Todo
+
+- [ ] read the relevant papers and knock out all 3 auxiliary losses
+    - [ ] matching aware loss
+    - [ ] clip loss
+    - [ ] vision-aided adversarial loss
+- [ ] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
+- [ ] make sure it can be trained unconditionally
+- [ ] port over CLI from lightweight|stylegan2-pytorch
+- [ ] hook up laion dataset for text-image
 
 ## Citations
 
