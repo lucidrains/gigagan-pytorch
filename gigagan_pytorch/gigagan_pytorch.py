@@ -644,7 +644,25 @@ class Generator(nn.Module):
         num_layers = int(log2(image_size) - 1)
         self.num_layers = num_layers
 
+        # generator requires convolutions conditioned by the style vector
+        # and also has N convolutional kernels adaptively selected (one of the only novelties of the paper)
+
+        is_adaptive = num_conv_kernels > 1
+        dim_kernel_mod = num_conv_kernels if is_adaptive else 0
+
+        style_embed_split_dims = []
+
+        adaptive_conv = partial(AdaptiveConv2DMod, kernel = 3, num_conv_kernels = num_conv_kernels)
+
+        # initial 4x4 block and conv
+
         self.init_block = nn.Parameter(torch.randn(dim_latent, 4, 4))
+        self.init_conv = adaptive_conv(dim_latent, dim_latent)
+
+        style_embed_split_dims.extend([
+            dim_latent,
+            dim_kernel_mod
+        ])
 
         # main network
 
@@ -665,16 +683,6 @@ class Generator(nn.Module):
         dim_pairs = list(zip(dim_layers[:-1], dim_layers[1:]))
 
         self.layers = nn.ModuleList([])
-
-        # generator requires convolutions conditioned by the style vector
-        # and also has N convolutional kernels adaptively selected (one of the only novelties of the paper)
-
-        is_adaptive = num_conv_kernels > 1
-        dim_kernel_mod = num_conv_kernels if is_adaptive else 0
-
-        style_embed_split_dims = []
-
-        adaptive_conv = partial(AdaptiveConv2DMod, kernel = 3, num_conv_kernels = num_conv_kernels)
 
         # go through layers and construct all parameters
 
@@ -775,6 +783,7 @@ class Generator(nn.Module):
         batch_size = styles.shape[0]
 
         x = repeat(self.init_block, 'c h w -> b c h w', b = batch_size)
+        x = self.init_conv(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
 
         rgb = torch.zeros((batch_size, self.channels, 4, 4), device = self.device, dtype = x.dtype)
 
@@ -933,6 +942,7 @@ class Discriminator(nn.Module):
 
         self.to_logits = nn.Sequential(
             conv2d_3x3(dim_last, dim_last),
+            leaky_relu(),
             Rearrange('b c h w -> b (c h w)'),
             nn.Linear(dim_last * (4 ** 2), 1),
             Rearrange('b 1 -> b')
