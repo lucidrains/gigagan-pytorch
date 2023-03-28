@@ -609,6 +609,7 @@ class StyleNetwork(nn.Module):
 
 # generator
 
+@beartype
 class Generator(nn.Module):
     def __init__(
         self,
@@ -629,7 +630,8 @@ class Generator(nn.Module):
         cross_attn_dim_head = 64,
         cross_attn_heads = 8,
         cross_ff_mult = 4,
-        num_conv_kernels = 2  # the number of adaptive conv kernels
+        num_conv_kernels = 2,  # the number of adaptive conv kernels
+        use_glu = False
     ):
         super().__init__()
         self.dim = dim
@@ -684,11 +686,14 @@ class Generator(nn.Module):
             has_self_attn = resolution in self_attn_resolutions
             has_cross_attn = resolution in cross_attn_resolutions
 
+            mult = 2 if use_glu else 1
+            act_fn = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
+
             resnet_block = nn.ModuleList([
-                adaptive_conv(dim_in, dim_out),
-                leaky_relu(),
-                adaptive_conv(dim_out, dim_out),
-                leaky_relu()
+                adaptive_conv(dim_in, dim_out * mult),
+                act_fn(),
+                adaptive_conv(dim_out, dim_out * mult),
+                act_fn()
             ])
 
             to_rgb = adaptive_conv(dim_out, channels)
@@ -830,6 +835,7 @@ class Predictor(nn.Module):
         x = x + residual
         return self.to_logits(x)
 
+@beartype
 class Discriminator(nn.Module):
     def __init__(
         self,
@@ -848,7 +854,8 @@ class Discriminator(nn.Module):
         multiscale_input_resolutions: Tuple[int] = (64, 32, 16, 8),
         multiscale_output_resolutions: Tuple[int] = (32, 16, 8, 4),
         resize_mode = 'bilinear',
-        num_conv_kernels = 2
+        num_conv_kernels = 2,
+        use_glu = False
     ):
         super().__init__()
         assert is_power_of_two(image_size)
@@ -901,11 +908,14 @@ class Discriminator(nn.Module):
 
             residual_conv = nn.Conv2d(dim_in, dim_out, 1, stride = (2 if should_downsample else 1))
 
+            mult = 2 if use_glu else 1
+            act_fn = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
+
             resnet_block = nn.Sequential(
-                conv2d_3x3(dim_in, dim_out),
-                leaky_relu(),
-                conv2d_3x3(dim_out, dim_out),
-                leaky_relu()
+                conv2d_3x3(dim_in, dim_out * mult),
+                act_fn(),
+                conv2d_3x3(dim_out, dim_out * mult),
+                act_fn()
             )
 
             multiscale_output_predictor = None
