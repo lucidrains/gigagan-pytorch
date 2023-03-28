@@ -26,6 +26,7 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
     - [ ] matching aware loss
     - [ ] clip loss
     - [ ] vision-aided adversarial loss
+    - [ ] add reconstruction losses on arbitrary stages in the discriminator (lightweight gan)
 - [ ] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
 - [ ] make sure it can be trained unconditionally
 - [ ] port over CLI from lightweight|stylegan2-pytorch
