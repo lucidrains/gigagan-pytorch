@@ -10,7 +10,7 @@ from beartype import beartype
 from beartype.typing import List, Optional, Tuple
 
 from einops import rearrange, pack, unpack, repeat, reduce
-from einops.layers.torch import Rearrange
+from einops.layers.torch import Rearrange, Reduce
 
 from gigagan_pytorch.open_clip import OpenClipAdapter
 
@@ -27,6 +27,11 @@ def default(*vals):
 
 def is_power_of_two(n):
     return log2(n).is_integer()
+
+def safe_unshift(arr):
+    if len(arr) == 0:
+        return None
+    return arr.pop(0)
 
 # activation functions
 
@@ -117,6 +122,20 @@ def Downsample(dim):
     return nn.Sequential(
         Rearrange('b c (h s1) (w s2) -> b (c s1 s2) h w', s1 = 2, s2 = 2),
         nn.Conv2d(dim * 4, dim, 1)
+    )
+
+# skip layer excitation
+
+def SqueezeExcite(dim, dim_out, reduction = 4, dim_min = 32):
+    dim_hidden = max(dim_out // reduction, dim_min)
+
+    return nn.Sequential(
+        Reduce('b c h w -> b c', 'mean'),
+        nn.Linear(dim, dim_hidden),
+        nn.SiLU(),
+        nn.Linear(dim_hidden, dim_out),
+        nn.Sigmoid(),
+        Rearrange('b c -> b c 1 1')
     )
 
 # adaptive conv
@@ -631,7 +650,8 @@ class Generator(nn.Module):
         cross_attn_heads = 8,
         cross_ff_mult = 4,
         num_conv_kernels = 2,  # the number of adaptive conv kernels
-        use_glu = False
+        use_glu = False,
+        num_skip_layers_excite = 0
     ):
         super().__init__()
         self.dim = dim
@@ -682,6 +702,8 @@ class Generator(nn.Module):
         dim_last = dim_layers[-1]
         dim_pairs = list(zip(dim_layers[:-1], dim_layers[1:]))
 
+        self.num_skip_layers_excite = num_skip_layers_excite
+
         self.layers = nn.ModuleList([])
 
         # go through layers and construct all parameters
@@ -690,9 +712,15 @@ class Generator(nn.Module):
             is_first = ind == 0
             is_last = (ind + 1) == len(dim_pairs)
             should_upsample = not is_last
+            should_skip_layer_excite = num_skip_layers_excite > 0 and (ind + num_skip_layers_excite) < len(dim_pairs)
 
             has_self_attn = resolution in self_attn_resolutions
             has_cross_attn = resolution in cross_attn_resolutions
+
+            skip_squeeze_excite = None
+            if should_skip_layer_excite:
+                dim_skip_in, _ = dim_pairs[ind + num_skip_layers_excite]
+                skip_squeeze_excite = SqueezeExcite(dim_in, dim_skip_in)
 
             mult = 2 if use_glu else 1
             act_fn = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
@@ -728,6 +756,7 @@ class Generator(nn.Module):
             ])
 
             self.layers.append(nn.ModuleList([
+                skip_squeeze_excite,
                 resnet_block,
                 to_rgb,
                 self_attn,
@@ -787,9 +816,21 @@ class Generator(nn.Module):
 
         rgb = torch.zeros((batch_size, self.channels, 4, 4), device = self.device, dtype = x.dtype)
 
+        # skip layer squeeze excitations
+
+        excitations = [None] * self.num_skip_layers_excite
+
         # main network
 
-        for (resnet_conv1, act1, resnet_conv2, act2), to_rgb_conv, self_attn, cross_attn, upsample, upsample_rgb in self.layers:
+        for squeeze_excite, (resnet_conv1, act1, resnet_conv2, act2), to_rgb_conv, self_attn, cross_attn, upsample, upsample_rgb in self.layers:
+
+            if exists(squeeze_excite):
+                skip_excite = squeeze_excite(x)
+                excitations.append(skip_excite)
+
+            excite = safe_unshift(excitations)
+            if exists(excite):
+                x = x * excite
 
             x = resnet_conv1(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
             x = act1(x)
@@ -864,7 +905,8 @@ class Discriminator(nn.Module):
         multiscale_output_resolutions: Tuple[int] = (32, 16, 8, 4),
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
-        use_glu = False
+        use_glu = False,
+        num_skip_layers_excite = 0
     ):
         super().__init__()
         assert is_power_of_two(image_size)
@@ -898,6 +940,8 @@ class Discriminator(nn.Module):
         dim_last = dim_layers[-1]
         dim_pairs = list(zip(dim_layers[:-1], dim_layers[1:]))
 
+        self.num_skip_layers_excite = num_skip_layers_excite
+
         self.residual_scale = 2 ** -0.5
         self.layers = nn.ModuleList([])
 
@@ -908,10 +952,16 @@ class Discriminator(nn.Module):
             is_first = ind == 0
             is_last = (ind + 1) == len(dim_pairs)
             should_downsample = not is_last
+            should_skip_layer_excite = not is_first and num_skip_layers_excite > 0 and (ind + num_skip_layers_excite) < len(dim_pairs)
 
             has_attn = resolution in attn_resolutions
             has_multiscale_input = resolution in multiscale_input_resolutions
             has_multiscale_output = resolution in multiscale_output_resolutions
+
+            skip_squeeze_excite = None
+            if should_skip_layer_excite:
+                dim_skip_in, _ = dim_pairs[ind + num_skip_layers_excite]
+                skip_squeeze_excite = SqueezeExcite(dim_in, dim_skip_in)
 
             dim_in = dim_in + (channels if has_multiscale_input else 0)
 
@@ -933,6 +983,7 @@ class Discriminator(nn.Module):
                 predictor_dims.extend([dim_out, dim_kernel_attn])
 
             self.layers.append(nn.ModuleList([
+                skip_squeeze_excite,
                 resnet_block,
                 residual_conv,
                 SelfAttentionBlock(dim_out, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult) if has_attn else None,
@@ -974,10 +1025,24 @@ class Discriminator(nn.Module):
 
         x = images
 
+        # hold multiscale outputs
+
         multiscale_outputs = []
 
-        for block, residual_fn, attn, predictor, downsample in self.layers:
+        # excitations
+
+        excitations = [None] * (self.num_skip_layers_excite + 1) # +1 since first image in pixel space is not excited
+
+        for squeeze_excite, block, residual_fn, attn, predictor, downsample in self.layers:
             resolution = x.shape[-1]
+
+            if exists(squeeze_excite):
+                skip_excite = squeeze_excite(x)
+                excitations.append(skip_excite)
+
+            excite = safe_unshift(excitations)
+            if exists(excite):
+                x = x * excite
 
             if resolution in self.multiscale_input_resolutions:
                 resized_images = F.interpolate(images, resolution, mode = self.resize_mode)
