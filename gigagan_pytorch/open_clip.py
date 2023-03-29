@@ -1,10 +1,13 @@
 import torch
-from torch import nn
+from torch import nn, einsum
 import torch.nn.functional as F
 import open_clip
 
 from beartype import beartype
-from beartype.typing import List
+from beartype.typing import List, Optional
+
+def exists(val):
+    return val is not None
 
 def l2norm(t):
     return F.normalize(t, dim = -1)
@@ -85,8 +88,33 @@ class OpenClipAdapter(nn.Module):
         del self.text_encodings
         return l2norm(text_embed.float()), text_encodings.float()
 
-    def embed_image(self, image):
+    def embed_images(self, images):
+        if images.shape[-1] != self.image_size:
+            images = F.interpolate(images, self.image_size)
+
         assert not self.cleared
-        image = self.clip_normalize(image)
-        image_embed = self.clip.encode_image(image)
-        return l2norm(image_embed.float()), None
+        images = self.clip_normalize(images)
+        image_embeds = self.clip.encode_image(images)
+        return l2norm(image_embeds.float()), None
+
+    def contrastive_loss(
+        self,
+        images,
+        texts: Optional[List[str]] = None,
+        text_embeds: Optional[torch.Tensor] = None
+    ):
+        assert exists(texts) ^ exists(text_embeds)
+
+        if not exists(text_embeds):
+            text_embeds, _ = self.embed_texts(texts)
+
+        image_embeds, _ = self.embed_images(images)
+
+        n = text_embeds.shape[0]
+
+        temperature = self.clip.logit_scale.exp()
+        sim = einsum('i d, j d -> i j', text_embeds, image_embeds) * temperature
+
+        labels = torch.arange(n, device = sim.device)
+
+        return (F.cross_entropy(sim, labels) + F.cross_entropy(sim.t(), labels)) / 2

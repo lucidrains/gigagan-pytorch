@@ -43,6 +43,9 @@ def conv2d_3x3(dim_in, dim_out):
 
 # tensor helpers
 
+def log(t, eps = 1e-20):
+    return t.clamp(min = eps).log()
+
 def gradient_penalty(
     images,
     output,
@@ -68,6 +71,25 @@ def gen_hinge_loss(fake):
 
 def hinge_loss(real, fake):
     return (F.relu(1 + real) + F.relu(1 - fake)).mean()
+
+# auxiliary losses
+
+def aux_matching_loss(real, fake):
+    return log(1 + real.exp()) + log(1 + fake.exp())
+
+@beartype
+def aux_clip_loss(
+    clip: OpenClipAdapter,
+    images: torch.Tensor,
+    texts: Optional[List[str]] = None,
+    text_embeds: Optional[torch.Tensor] = None
+):
+    assert exists(texts) ^ exists(text_embeds)
+
+    if exists(texts):
+        text_embeds = clip.embed_texts(texts)
+
+    return clip.contrastive_loss(images = images, text_embeds = text_embeds)
 
 # rmsnorm (newer papers show mean-centering in layernorm not necessary)
 

@@ -23,8 +23,8 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 ## Todo
 
 - [ ] read the relevant papers and knock out all 3 auxiliary losses
-    - [ ] matching aware loss
-    - [ ] clip loss
+    - [x] matching aware loss
+    - [x] clip loss
     - [ ] vision-aided adversarial loss
     - [ ] add reconstruction losses on arbitrary stages in the discriminator (lightweight gan)
 - [ ] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
