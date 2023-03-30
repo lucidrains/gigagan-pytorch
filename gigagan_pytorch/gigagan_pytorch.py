@@ -620,6 +620,7 @@ class StyleNetwork(nn.Module):
     ):
         super().__init__()
         self.dim = dim
+        self.dim_text_latent = dim_text_latent
 
         layers = []
         for i in range(depth):
@@ -673,7 +674,8 @@ class Generator(nn.Module):
         cross_ff_mult = 4,
         num_conv_kernels = 2,  # the number of adaptive conv kernels
         use_glu = False,
-        num_skip_layers_excite = 0
+        num_skip_layers_excite = 0,
+        unconditional = False
     ):
         super().__init__()
         self.dim = dim
@@ -681,6 +683,10 @@ class Generator(nn.Module):
 
         self.style_network = style_network
         self.text_encoder = text_encoder
+
+        self.unconditional = unconditional
+        assert not (unconditional and exists(text_encoder))
+        assert not (unconditional and exists(style_network) and style_network.dim_text_latent > 0)
 
         assert is_power_of_two(image_size)
         num_layers = int(log2(image_size) - 1)
@@ -737,7 +743,7 @@ class Generator(nn.Module):
             should_skip_layer_excite = num_skip_layers_excite > 0 and (ind + num_skip_layers_excite) < len(dim_pairs)
 
             has_self_attn = resolution in self_attn_resolutions
-            has_cross_attn = resolution in cross_attn_resolutions
+            has_cross_attn = resolution in cross_attn_resolutions and not unconditional
 
             skip_squeeze_excite = None
             if should_skip_layer_excite:
@@ -810,11 +816,14 @@ class Generator(nn.Module):
         # which requires global text tokens to adaptively select the kernels from the main contribution in the paper
         # and fine text tokens to attend to using cross attention
 
-        if exists(texts):
-            assert exists(self.text_encoder)
-            global_text_tokens, fine_text_tokens, text_mask = self.text_encoder(texts)
+        if not self.unconditional:
+            if exists(texts):
+                assert exists(self.text_encoder)
+                global_text_tokens, fine_text_tokens, text_mask = self.text_encoder(texts)
+            else:
+                assert all([*map(exists, (global_text_tokens, fine_text_tokens, text_mask))])
         else:
-            assert all([*map(exists, (global_text_tokens, fine_text_tokens, text_mask))])
+            assert not any([*map(exists, (texts, global_text_tokens, fine_text_tokens))])
 
         # determine styles
 
@@ -882,27 +891,35 @@ class Predictor(nn.Module):
         self,
         dim,
         depth = 4,
-        num_conv_kernels = 2
+        num_conv_kernels = 2,
+        unconditional = False
     ):
         super().__init__()
+        self.unconditional = unconditional
         self.residual_fn = nn.Conv2d(dim, dim, 1)
         self.layers = nn.ModuleList([])
 
+        klass = nn.Conv2d if unconditional else partial(AdaptiveConv2DMod, num_conv_kernels = num_conv_kernels)
+
         for ind in range(depth):
-            self.layers.append(AdaptiveConv2DMod(dim, dim, 1, num_conv_kernels = num_conv_kernels))
+            self.layers.append(klass(dim, dim, 1))
 
         self.to_logits = nn.Conv2d(dim, 1, 1)
 
     def forward(
         self,
         x,
-        mod,
+        mod = None,
         kernel_mod = None
     ):
         residual = self.residual_fn(x)
 
         for layer in self.layers:
-            x = layer(x, mod = mod, kernel_mod = kernel_mod)
+            kwargs = dict()
+            if not self.unconditional:
+                kwargs = dict(mod = mod, kernel_mod = kernel_mod)
+
+            x = layer(x, **kwargs)
 
         x = x + residual
         return self.to_logits(x)
@@ -928,9 +945,13 @@ class Discriminator(nn.Module):
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
         use_glu = False,
-        num_skip_layers_excite = 0
+        num_skip_layers_excite = 0,
+        unconditional = False
     ):
         super().__init__()
+        self.unconditional = unconditional
+        assert not (unconditional and exists(text_encoder))
+
         assert is_power_of_two(image_size)
         assert all([*map(is_power_of_two, attn_resolutions)])
 
@@ -1001,7 +1022,7 @@ class Discriminator(nn.Module):
 
             multiscale_output_predictor = None
             if has_multiscale_output:
-                multiscale_output_predictor = Predictor(dim_out, num_conv_kernels = num_conv_kernels)
+                multiscale_output_predictor = Predictor(dim_out, num_conv_kernels = num_conv_kernels, unconditional = unconditional)
                 predictor_dims.extend([dim_out, dim_kernel_attn])
 
             self.layers.append(nn.ModuleList([
@@ -1023,12 +1044,15 @@ class Discriminator(nn.Module):
 
         # take care of text conditioning in the multiscale predictor branches
 
-        assert exists(text_dim) ^ exists(text_encoder)
-        self.text_encoder = text_encoder
-        self.text_dim = default(text_dim, text_encoder.dim)
-        self.predictor_dims = predictor_dims
+        assert unconditional or (exists(text_dim) ^ exists(text_encoder))
 
-        self.text_to_conv_conditioning = nn.Linear(self.text_dim, sum(predictor_dims))
+        if not unconditional:
+            self.text_encoder = text_encoder
+
+            self.text_dim = default(text_dim, text_encoder.dim)
+
+            self.predictor_dims = predictor_dims
+            self.text_to_conv_conditioning = nn.Linear(self.text_dim, sum(predictor_dims)) if exists(self.text_dim) else None
 
     def forward(
         self,
@@ -1036,14 +1060,17 @@ class Discriminator(nn.Module):
         texts: Optional[List[str]] = None,
         text_embeds = None
     ):
-        assert exists(texts) ^ exists(text_embeds)
+        if not self.unconditional:
+            assert exists(texts) ^ exists(text_embeds)
 
-        if exists(texts):
-            assert exists(self.text_encoder)
-            text_embeds, *_ = self.text_encoder(texts)
+            if exists(texts):
+                assert exists(self.text_encoder)
+                text_embeds, *_ = self.text_encoder(texts)
 
-        conv_mods = self.text_to_conv_conditioning(text_embeds).split(self.predictor_dims, dim = -1)
-        conv_mods = iter(conv_mods)
+            conv_mods = self.text_to_conv_conditioning(text_embeds).split(self.predictor_dims, dim = -1)
+            conv_mods = iter(conv_mods)
+        else:
+            assert not any([*map(exists, (texts, text_embeds))])
 
         x = images
 
@@ -1077,7 +1104,11 @@ class Discriminator(nn.Module):
                 x = attn(x)
 
             if exists(predictor):
-                multiscale_outputs.append(predictor(x, mod = next(conv_mods), kernel_mod = next(conv_mods)))
+                pred_kwargs = dict()
+                if not self.unconditional:
+                    pred_kwargs = dict(mod = next(conv_mods), kernel_mod = next(conv_mods))
+
+                multiscale_outputs.append(predictor(x, **pred_kwargs))
 
             if exists(downsample):
                 x = downsample(x)

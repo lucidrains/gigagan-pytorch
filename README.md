@@ -22,13 +22,13 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 
 ## Todo
 
+- [x] make sure it can be trained unconditionally
 - [ ] read the relevant papers and knock out all 3 auxiliary losses
     - [x] matching aware loss
     - [x] clip loss
     - [ ] vision-aided adversarial loss
     - [ ] add reconstruction losses on arbitrary stages in the discriminator (lightweight gan)
 - [ ] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
-- [ ] make sure it can be trained unconditionally
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image
 
