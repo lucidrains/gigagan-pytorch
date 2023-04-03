@@ -3,6 +3,8 @@ from torch import nn, einsum
 import torch.nn.functional as F
 import open_clip
 
+from einops import rearrange
+
 from beartype import beartype
 from beartype.typing import List, Optional
 
@@ -30,10 +32,21 @@ class OpenClipAdapter(nn.Module):
         self.tokenizer = tokenizer
         self.eos_id = eos_id
 
+        # hook for getting final text representation
+
         text_attention_final = self.find_layer('ln_final')
         self._dim_latent = text_attention_final.weight.shape[0]
+        self.text_handle = text_attention_final.register_forward_hook(self._text_hook)
 
-        self.handle = text_attention_final.register_forward_hook(self._hook)
+        # hook for getting final image representation
+        # this is for vision-aided gan loss
+
+        image_attention_final = self.find_layer('visual.transformer')
+        self._dim_image_latent = self.find_layer('visual.ln_post').weight.shape[0]
+        self.image_handle = image_attention_final.register_forward_hook(self._image_hook)
+
+        # normalize fn
+
         self.clip_normalize = preprocess.transforms[-1]
         self.cleared = False
 
@@ -45,10 +58,14 @@ class OpenClipAdapter(nn.Module):
         if self.cleared:
             return
 
-        self.handle()
+        self.text_handle()
+        self.image_handle()
 
-    def _hook(self, _, inputs, outputs):
+    def _text_hook(self, _, inputs, outputs):
         self.text_encodings = outputs
+
+    def _image_hook(self, _, inputs, outputs):
+        self.image_encodings = outputs
 
     @property
     def dim_latent(self):
@@ -95,7 +112,11 @@ class OpenClipAdapter(nn.Module):
         assert not self.cleared
         images = self.clip_normalize(images)
         image_embeds = self.clip.encode_image(images)
-        return l2norm(image_embeds.float()), None
+
+        image_encodings = rearrange(self.image_encodings, 'n b d -> b n d')
+        del self.image_encodings
+
+        return l2norm(image_embeds.float()), image_encodings.float()
 
     def contrastive_loss(
         self,

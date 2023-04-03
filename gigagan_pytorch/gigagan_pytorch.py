@@ -886,6 +886,48 @@ class Generator(nn.Module):
 
 # discriminator
 
+class VisionAidedDiscriminator(nn.Module):
+    """ the vision-aided gan loss """
+    def __init__(
+        self,
+        *,
+        clip: OpenClipAdapter,
+        depth = 2,
+        dim_head = 64,
+        heads = 8
+    ):
+        super().__init__()
+        self.clip = clip
+        dim = clip._dim_image_latent
+
+        self.network = Transformer(
+            dim = dim,
+            depth = depth,
+            heads = heads,
+            dim_head = dim_head
+        )
+
+        self.to_pred = nn.Sequential(
+            nn.Linear(dim, 1),
+            Rearrange('... 1 -> ...')
+        )
+
+    def parameters(self):
+        return [
+            *self.network.parameters(),
+            *self.to_pred.parameters()
+        ]
+
+    def forward(self, images):
+        with torch.no_grad():
+            self.clip.eval()
+            _, image_encodings = self.clip.embed_images(images)
+            image_encodings = image_encodings.detach()
+
+        encoded = self.network(image_encodings)
+        logits = self.to_pred(encoded)
+        return logits
+
 class Predictor(nn.Module):
     def __init__(
         self,
