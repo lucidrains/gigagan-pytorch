@@ -886,6 +886,26 @@ class Generator(nn.Module):
 
 # discriminator
 
+class RandomFixedProjection(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        channel_first = True
+    ):
+        super().__init__()
+        weights = torch.randn(dim, dim_out)
+        nn.init.kaiming_normal_(weights, mode = 'fan_out', nonlinearity = 'linear')
+
+        self.channel_first = channel_first
+        self.register_buffer('fixed_weights', weights)
+
+    def forward(self, x):
+        if not self.channel_first:
+            return x @ self.fixed_weights
+
+        return einsum('b c ..., c d -> b d ...', x, self.fixed_weights)
+
 class VisionAidedDiscriminator(nn.Module):
     """ the vision-aided gan loss """
     def __init__(
