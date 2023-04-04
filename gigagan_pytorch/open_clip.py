@@ -50,6 +50,10 @@ class OpenClipAdapter(nn.Module):
         self.clip_normalize = preprocess.transforms[-1]
         self.cleared = False
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def find_layer(self,  layer):
         modules = dict([*self.clip.named_modules()])
         return modules.get(layer, None)
@@ -91,6 +95,7 @@ class OpenClipAdapter(nn.Module):
         texts: List[str]
     ):
         ids = self.tokenizer(texts)
+        ids = ids.to(self.device)
         ids = ids[..., :self.max_text_len]
 
         is_eos_id = (ids == self.eos_id)

@@ -1,5 +1,6 @@
 from math import log2
 from functools import partial
+from random import randrange
 
 import torch
 import torch.nn.functional as F
@@ -32,6 +33,9 @@ def safe_unshift(arr):
     if len(arr) == 0:
         return None
     return arr.pop(0)
+
+def divisible_by(numer, denom):
+    return (numer % denom) == 0
 
 # activation functions
 
@@ -664,11 +668,11 @@ class Generator(nn.Module):
         style_network: Optional[StyleNetwork] = None,
         text_encoder: Optional[TextEncoder] = None,
         dim_latent = 512,
-        self_attn_resolutions: Tuple[int] = (32, 16),
+        self_attn_resolutions: Tuple[int, ...] = (32, 16),
         self_attn_dim_head = 64,
         self_attn_heads = 8,
         self_ff_mult = 4,
-        cross_attn_resolutions: Tuple[int] = (32, 16),
+        cross_attn_resolutions: Tuple[int, ...] = (32, 16),
         cross_attn_dim_head = 64,
         cross_attn_heads = 8,
         cross_ff_mult = 4,
@@ -886,6 +890,50 @@ class Generator(nn.Module):
 
 # discriminator
 
+@beartype
+class SimpleDecoder(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        dims: Tuple[int, ...],
+        num_patches = 1
+    ):
+        super().__init__()
+        self.num_patches = num_patches
+
+        dims = [dim, *dims]
+
+        layers = [conv2d_3x3(dim, dim)]
+
+        for dim_in, dim_out in zip(dims[:-1], dims[1:]):
+            layers.append(nn.Sequential(
+                Upsample(dim_in),
+                conv2d_3x3(dim_in, dim_out * 2),
+                nn.GLU(dim = 1)
+            ))
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(
+        self,
+        fmap,
+        orig_image
+    ):
+        if self.num_patches > 1:
+            fmap_size, img_size = fmap.shape[-1], orig_image.shape[-1]
+
+            assert divisible_by(fmap_size, self.num_patches)
+            assert divisible_by(img_size, self.num_patches)
+
+            fmap, orig_image = map(lambda t: rearrange(t, 'b c (p1 h) (p2 w) -> (p1 p2) b c h w', p1 = self.num_patches, p2 = self.num_patches), (fmap, orig_image))
+
+            rand_index = randrange(0, self.num_patches ** 2)
+            fmap, orig_image = map(lambda t: t[rand_index], (fmap, orig_image))
+
+        recon = self.net(fmap)
+        return F.mse_loss(recon, orig_image)
+
 class RandomFixedProjection(nn.Module):
     def __init__(
         self,
@@ -1004,6 +1052,8 @@ class Discriminator(nn.Module):
         text_dim = None,
         multiscale_input_resolutions: Tuple[int] = (64, 32, 16, 8),
         multiscale_output_resolutions: Tuple[int] = (32, 16, 8, 4),
+        aux_recon_resolutions: Tuple[int] = (8,),
+        aux_recon_patches: Tuple[int] = (2,),
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
         use_glu = False,
@@ -1029,6 +1079,9 @@ class Discriminator(nn.Module):
 
         self.multiscale_output_resolutions = multiscale_output_resolutions
 
+        assert all([*map(is_power_of_two, aux_recon_resolutions)])
+        self.aux_recon_resolutions_to_patches = {resolution: patches for resolution, patches in zip(aux_recon_resolutions, aux_recon_patches)}
+
         self.resize_mode = resize_mode
 
         num_layers = int(log2(image_size) - 1)
@@ -1050,6 +1103,7 @@ class Discriminator(nn.Module):
         self.residual_scale = 2 ** -0.5
         self.layers = nn.ModuleList([])
 
+        upsample_dims = []
         predictor_dims = []
         dim_kernel_attn = (num_conv_kernels if num_conv_kernels > 1 else 0)
 
@@ -1062,6 +1116,9 @@ class Discriminator(nn.Module):
             has_attn = resolution in attn_resolutions
             has_multiscale_input = resolution in multiscale_input_resolutions
             has_multiscale_output = resolution in multiscale_output_resolutions
+
+            has_aux_recon_decoder = resolution in aux_recon_resolutions
+            upsample_dims.insert(0, dim_in)
 
             skip_squeeze_excite = None
             if should_skip_layer_excite:
@@ -1087,12 +1144,24 @@ class Discriminator(nn.Module):
                 multiscale_output_predictor = Predictor(dim_out, num_conv_kernels = num_conv_kernels, unconditional = unconditional)
                 predictor_dims.extend([dim_out, dim_kernel_attn])
 
+            aux_recon_decoder = None
+
+            if has_aux_recon_decoder:
+                num_patches = self.aux_recon_resolutions_to_patches[resolution]
+
+                aux_recon_decoder = SimpleDecoder(
+                    dim_out,
+                    dims = tuple(upsample_dims),
+                    num_patches = num_patches
+                )
+
             self.layers.append(nn.ModuleList([
                 skip_squeeze_excite,
                 resnet_block,
                 residual_conv,
                 SelfAttentionBlock(dim_out, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult) if has_attn else None,
                 multiscale_output_predictor,
+                aux_recon_decoder,
                 Downsample(dim_out) if should_downsample else None,
             ]))
 
@@ -1140,11 +1209,15 @@ class Discriminator(nn.Module):
 
         multiscale_outputs = []
 
+        # hold auxiliary recon losses
+
+        aux_recon_losses = []
+
         # excitations
 
         excitations = [None] * (self.num_skip_layers_excite + 1) # +1 since first image in pixel space is not excited
 
-        for squeeze_excite, block, residual_fn, attn, predictor, downsample in self.layers:
+        for squeeze_excite, block, residual_fn, attn, predictor, recon_decoder, downsample in self.layers:
             resolution = x.shape[-1]
 
             if exists(squeeze_excite):
@@ -1178,9 +1251,14 @@ class Discriminator(nn.Module):
             x = x + residual
             x = x * self.residual_scale
 
+            if exists(recon_decoder):
+                aux_recon_loss = recon_decoder(x, images)
+                aux_recon_losses.append(aux_recon_loss)
+
         logits = self.to_logits(x)   
 
-        return logits, multiscale_outputs
+        print(aux_recon_losses[0])
+        return logits, multiscale_outputs, aux_recon_losses
 
 # gan
 

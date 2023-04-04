@@ -27,8 +27,8 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
     - [x] matching aware loss
     - [x] clip loss
     - [x] vision-aided discriminator loss
+    - [x] add reconstruction losses on arbitrary stages in the discriminator (lightweight gan)
     - [ ] figure out how the random projections are used from projected-gan
-    - [ ] add reconstruction losses on arbitrary stages in the discriminator (lightweight gan)
 - [ ] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image
