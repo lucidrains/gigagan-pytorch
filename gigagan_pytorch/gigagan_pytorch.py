@@ -1080,6 +1080,7 @@ class Discriminator(nn.Module):
         self.multiscale_output_resolutions = multiscale_output_resolutions
 
         assert all([*map(is_power_of_two, aux_recon_resolutions)])
+        assert len(aux_recon_resolutions) == len(aux_recon_patches)
         self.aux_recon_resolutions_to_patches = {resolution: patches for resolution, patches in zip(aux_recon_resolutions, aux_recon_patches)}
 
         self.resize_mode = resize_mode
@@ -1257,7 +1258,6 @@ class Discriminator(nn.Module):
 
         logits = self.to_logits(x)   
 
-        print(aux_recon_losses[0])
         return logits, multiscale_outputs, aux_recon_losses
 
 # gan
