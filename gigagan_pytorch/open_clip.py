@@ -41,9 +41,16 @@ class OpenClipAdapter(nn.Module):
         # hook for getting final image representation
         # this is for vision-aided gan loss
 
-        image_attention_final = self.find_layer('visual.transformer')
         self._dim_image_latent = self.find_layer('visual.ln_post').weight.shape[0]
-        self.image_handle = image_attention_final.register_forward_hook(self._image_hook)
+
+        num_visual_layers = len(clip.visual.transformer.resblocks)
+        self.image_handles = []
+
+        for visual_layer in range(num_visual_layers):
+            image_attention_final = self.find_layer(f'visual.transformer.resblocks.{visual_layer}')
+
+            handle = image_attention_final.register_forward_hook(self._image_hook)
+            self.image_handles.append(handle)
 
         # normalize fn
 
@@ -69,7 +76,10 @@ class OpenClipAdapter(nn.Module):
         self.text_encodings = outputs
 
     def _image_hook(self, _, inputs, outputs):
-        self.image_encodings = outputs
+        if not hasattr(self, 'image_encodings'):
+            self.image_encodings = []
+
+        self.image_encodings.append(outputs)
 
     @property
     def dim_latent(self):
@@ -118,7 +128,7 @@ class OpenClipAdapter(nn.Module):
         images = self.clip_normalize(images)
         image_embeds = self.clip.encode_image(images)
 
-        image_encodings = rearrange(self.image_encodings, 'n b d -> b n d')
+        image_encodings = rearrange(self.image_encodings, 'l n b d -> l b n d')
         del self.image_encodings
 
         return l2norm(image_embeds.float()), image_encodings.float()

@@ -962,25 +962,30 @@ class VisionAidedDiscriminator(nn.Module):
         clip: OpenClipAdapter,
         depth = 2,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        layer_indices = (-1, -2, -3)
     ):
         super().__init__()
         self.clip = clip
         dim = clip._dim_image_latent
 
-        self.random_proj = RandomFixedProjection(dim, dim)
+        self.layer_discriminators = nn.ModuleList([])
+        self.layer_indices = layer_indices
 
-        self.network = Transformer(
-            dim = dim,
-            depth = depth,
-            heads = heads,
-            dim_head = dim_head
-        )
-
-        self.to_pred = nn.Sequential(
-            nn.Linear(dim, 1),
-            Rearrange('... 1 -> ...')
-        )
+        for _ in layer_indices:
+            self.layer_discriminators.append(nn.Sequential(
+                RandomFixedProjection(dim, dim),
+                Transformer(
+                    dim = dim,
+                    depth = depth,
+                    heads = heads,
+                    dim_head = dim_head
+                ),
+                nn.Sequential(
+                    nn.Linear(dim, 1),
+                    Rearrange('... 1 -> ...')
+                )
+            ))
 
     def parameters(self):
         return [
@@ -994,9 +999,11 @@ class VisionAidedDiscriminator(nn.Module):
             _, image_encodings = self.clip.embed_images(images)
             image_encodings = image_encodings.detach()
 
-        image_encodings = self.random_proj(image_encodings)
-        encoded = self.network(image_encodings)
-        logits = self.to_pred(encoded)
+        logits = []
+        for layer_index, layer_to_logits in zip(self.layer_indices, self.layer_discriminators):
+            layer_logits = layer_to_logits(image_encodings[layer_index])
+            logits.append(layer_logits)
+
         return logits
 
 class Predictor(nn.Module):
