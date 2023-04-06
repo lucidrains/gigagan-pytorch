@@ -28,7 +28,8 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
     - [x] clip loss
     - [x] vision-aided discriminator loss
     - [x] add reconstruction losses on arbitrary stages in the discriminator (lightweight gan)
-    - [ ] figure out how the random projections are used from projected-gan
+    - [x] figure out how the random projections are used from projected-gan
+    - [ ] vision aided discriminator needs to extract N layers from the vision model in CLIP - figure out whether to discard CLS token and reshape into image dimensions for convolution, or stick with attention and condition with adaptive layernorm    
 - [ ] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image
