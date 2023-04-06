@@ -1,4 +1,4 @@
-from math import log2
+from math import log2, sqrt
 from functools import partial
 from random import randrange
 
@@ -939,7 +939,7 @@ class RandomFixedProjection(nn.Module):
         self,
         dim,
         dim_out,
-        channel_first = False
+        channel_first = True
     ):
         super().__init__()
         weights = torch.randn(dim, dim_out)
@@ -963,29 +963,34 @@ class VisionAidedDiscriminator(nn.Module):
         depth = 2,
         dim_head = 64,
         heads = 8,
-        layer_indices = (-1, -2, -3)
+        layer_indices = (-1, -2, -3),
+        text_dim = None,
+        unconditional = False,
+        num_conv_kernels = 2
     ):
         super().__init__()
         self.clip = clip
         dim = clip._dim_image_latent
 
+        self.unconditional = unconditional
+        text_dim = default(text_dim, dim)
+
         self.layer_discriminators = nn.ModuleList([])
         self.layer_indices = layer_indices
 
+        conv_klass = partial(AdaptiveConv2DMod, kernel = 3, num_conv_kernels = num_conv_kernels) if not unconditional else conv2d_3x3
+
         for _ in layer_indices:
-            self.layer_discriminators.append(nn.Sequential(
+            self.layer_discriminators.append(nn.ModuleList([
                 RandomFixedProjection(dim, dim),
-                Transformer(
-                    dim = dim,
-                    depth = depth,
-                    heads = heads,
-                    dim_head = dim_head
-                ),
+                conv_klass(dim, dim),
+                nn.Linear(text_dim, dim) if not unconditional else None,
+                nn.Linear(text_dim, num_conv_kernels) if not unconditional else None,
                 nn.Sequential(
-                    nn.Linear(dim, 1),
-                    Rearrange('... 1 -> ...')
+                    conv2d_3x3(dim, 1),
+                    Rearrange('b 1 ... -> b ...')
                 )
-            ))
+            ]))
 
     def parameters(self):
         return [
@@ -993,15 +998,39 @@ class VisionAidedDiscriminator(nn.Module):
             *self.to_pred.parameters()
         ]
 
-    def forward(self, images):
+    def forward(
+        self,
+        images,
+        text_embeds = None
+    ):
         with torch.no_grad():
             self.clip.eval()
             _, image_encodings = self.clip.embed_images(images)
             image_encodings = image_encodings.detach()
 
         logits = []
-        for layer_index, layer_to_logits in zip(self.layer_indices, self.layer_discriminators):
-            layer_logits = layer_to_logits(image_encodings[layer_index])
+        for layer_index, (rand_proj, conv, to_conv_mod, to_conv_kernel_mod, to_logits) in zip(self.layer_indices, self.layer_discriminators):
+            image_encoding = image_encodings[layer_index]
+
+            cls_token, rest_tokens = image_encoding[:, :1], image_encoding[:, 1:]
+            height_width = int(sqrt(rest_tokens.shape[-2])) # assume square
+
+            img_fmap = rearrange(rest_tokens, 'b (h w) d -> b d h w', h = height_width)
+            img_fmap = img_fmap + rearrange(cls_token, 'b 1 d -> b d 1 1 ') # pool the cls token into the rest of the tokens
+
+            if self.unconditional:
+                img_fmap = conv(img_fmap)
+            else:
+                assert exists(text_embeds)
+
+                img_fmap = conv(
+                    img_fmap,
+                    mod = to_conv_mod(text_embeds),
+                    kernel_mod = to_conv_kernel_mod(text_embeds)
+                )
+
+            layer_logits = to_logits(img_fmap)
+
             logits.append(layer_logits)
 
         return logits

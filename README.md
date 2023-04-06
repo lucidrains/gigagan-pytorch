@@ -23,14 +23,15 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 ## Todo
 
 - [x] make sure it can be trained unconditionally
-- [ ] read the relevant papers and knock out all 3 auxiliary losses
+- [x] read the relevant papers and knock out all 3 auxiliary losses
     - [x] matching aware loss
     - [x] clip loss
     - [x] vision-aided discriminator loss
     - [x] add reconstruction losses on arbitrary stages in the discriminator (lightweight gan)
     - [x] figure out how the random projections are used from projected-gan
     - [x] vision aided discriminator needs to extract N layers from the vision model in CLIP
-    - [ ] figure out whether to discard CLS token and reshape into image dimensions for convolution, or stick with attention and condition with adaptive layernorm - also turn off vision aided gan in unconditional case
+    - [x] figure out whether to discard CLS token and reshape into image dimensions for convolution, or stick with attention and condition with adaptive layernorm - also turn off vision aided gan in unconditional case
+- [ ] do a review of the auxiliary losses
 - [ ] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image
