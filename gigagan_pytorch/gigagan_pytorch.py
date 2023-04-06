@@ -964,6 +964,7 @@ class VisionAidedDiscriminator(nn.Module):
         dim_head = 64,
         heads = 8,
         layer_indices = (-1, -2, -3),
+        conv_dim = None,
         text_dim = None,
         unconditional = False,
         num_conv_kernels = 2
@@ -974,6 +975,7 @@ class VisionAidedDiscriminator(nn.Module):
 
         self.unconditional = unconditional
         text_dim = default(text_dim, dim)
+        conv_dim = default(conv_dim, dim)
 
         self.layer_discriminators = nn.ModuleList([])
         self.layer_indices = layer_indices
@@ -982,12 +984,12 @@ class VisionAidedDiscriminator(nn.Module):
 
         for _ in layer_indices:
             self.layer_discriminators.append(nn.ModuleList([
-                RandomFixedProjection(dim, dim),
-                conv_klass(dim, dim),
-                nn.Linear(text_dim, dim) if not unconditional else None,
+                RandomFixedProjection(dim, conv_dim),
+                conv_klass(conv_dim, conv_dim),
+                nn.Linear(text_dim, conv_dim) if not unconditional else None,
                 nn.Linear(text_dim, num_conv_kernels) if not unconditional else None,
                 nn.Sequential(
-                    conv2d_3x3(dim, 1),
+                    conv2d_3x3(conv_dim, 1),
                     Rearrange('b 1 ... -> b ...')
                 )
             ]))
@@ -1016,7 +1018,9 @@ class VisionAidedDiscriminator(nn.Module):
             height_width = int(sqrt(rest_tokens.shape[-2])) # assume square
 
             img_fmap = rearrange(rest_tokens, 'b (h w) d -> b d h w', h = height_width)
+
             img_fmap = img_fmap + rearrange(cls_token, 'b 1 d -> b d 1 1 ') # pool the cls token into the rest of the tokens
+            img_fmap = rand_proj(img_fmap)
 
             if self.unconditional:
                 img_fmap = conv(img_fmap)
