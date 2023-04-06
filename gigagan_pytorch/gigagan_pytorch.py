@@ -939,7 +939,7 @@ class RandomFixedProjection(nn.Module):
         self,
         dim,
         dim_out,
-        channel_first = True
+        channel_first = False
     ):
         super().__init__()
         weights = torch.randn(dim, dim_out)
@@ -968,6 +968,8 @@ class VisionAidedDiscriminator(nn.Module):
         self.clip = clip
         dim = clip._dim_image_latent
 
+        self.random_proj = RandomFixedProjection(dim, dim)
+
         self.network = Transformer(
             dim = dim,
             depth = depth,
@@ -992,6 +994,7 @@ class VisionAidedDiscriminator(nn.Module):
             _, image_encodings = self.clip.embed_images(images)
             image_encodings = image_encodings.detach()
 
+        image_encodings = self.random_proj(image_encodings)
         encoded = self.network(image_encodings)
         logits = self.to_pred(encoded)
         return logits
