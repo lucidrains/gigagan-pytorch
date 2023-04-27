@@ -558,8 +558,8 @@ class Transformer(nn.Module):
 
 # text encoder
 
-@beartype
 class TextEncoder(nn.Module):
+    @beartype
     def __init__(
         self,
         *,
@@ -587,6 +587,7 @@ class TextEncoder(nn.Module):
             heads = heads
         )
 
+    @beartype
     def forward(
         self,
         texts: List[str]
@@ -655,8 +656,8 @@ class StyleNetwork(nn.Module):
 
 # generator
 
-@beartype
 class Generator(nn.Module):
+    @beartype
     def __init__(
         self,
         *,
@@ -805,7 +806,8 @@ class Generator(nn.Module):
     @property
     def device(self):
         return next(self.parameters()).device
-    
+
+    @beartype
     def forward(
         self,
         noise = None,
@@ -814,7 +816,8 @@ class Generator(nn.Module):
         global_text_tokens = None,
         fine_text_tokens = None,
         text_mask = None,
-        batch_size = 1
+        batch_size = 1,
+        return_all_rgbs = False
     ):
         # take care of text encodings
         # which requires global text tokens to adaptively select the kernels from the main contribution in the paper
@@ -855,6 +858,10 @@ class Generator(nn.Module):
 
         excitations = [None] * self.num_skip_layers_excite
 
+        # all the rgb's of each layer of the generator is to be saved for multi-resolution input discrimination
+
+        rgbs = []
+
         # main network
 
         for squeeze_excite, (resnet_conv1, act1, resnet_conv2, act2), to_rgb_conv, self_attn, cross_attn, upsample, upsample_rgb in self.layers:
@@ -878,13 +885,20 @@ class Generator(nn.Module):
             if exists(cross_attn):
                 x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
 
-            rgb = rgb + to_rgb_conv(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
+            layer_rgb = to_rgb_conv(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
+
+            rgbs.append(layer_rgb)
+
+            rgb = rgb + layer_rgb
 
             if exists(upsample):
                 x = upsample(x)
 
             if exists(upsample_rgb):
                 rgb = upsample_rgb(rgb)
+
+        if return_all_rgbs:
+            return rgb, rgbs
 
         return rgb
 
@@ -1077,8 +1091,8 @@ class Predictor(nn.Module):
         x = x + residual
         return self.to_logits(x)
 
-@beartype
 class Discriminator(nn.Module):
+    @beartype
     def __init__(
         self,
         *,
@@ -1229,11 +1243,17 @@ class Discriminator(nn.Module):
             self.predictor_dims = predictor_dims
             self.text_to_conv_conditioning = nn.Linear(self.text_dim, sum(predictor_dims)) if exists(self.text_dim) else None
 
+    def resize_image_to(self, images, resolution):
+        return F.interpolate(images, resolution, mode = self.resize_mode)
+
+    @beartype
     def forward(
         self,
         images,
+        rgbs: Optional[List[torch.Tensor]] = None,  # multi-resolution inputs (rgbs) from the generator
         texts: Optional[List[str]] = None,
-        text_embeds = None
+        text_embeds = None,
+        real_images = None                          # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
     ):
         if not self.unconditional:
             assert exists(texts) ^ exists(text_embeds)
@@ -1248,6 +1268,20 @@ class Discriminator(nn.Module):
             assert not any([*map(exists, (texts, text_embeds))])
 
         x = images
+
+        # if real images are passed in, assume `images` are generated, and take care of all the multi-resolution input. this can also be done externally, in which case `real_images` will not be populated
+
+        has_real_images = exists(real_images)
+        x = torch.cat((x, real_images), dim = 0)
+
+        assert not (has_real_images and not exists(rgbs)) 
+
+        if has_real_images:
+            rgbs = [torch.cat((rgb, self.resize_image_to(rgb, rgb.shape[-1])), dim = 0) for rgb in rgbs]
+
+        # index the rgbs by resolution
+
+        rgbs_index = {t.shape[-1]: t for t in rgbs} if exists(rgbs) else {}
 
         # hold multiscale outputs
 
@@ -1273,8 +1307,13 @@ class Discriminator(nn.Module):
                 x = x * excite
 
             if resolution in self.multiscale_input_resolutions:
-                resized_images = F.interpolate(images, resolution, mode = self.resize_mode)
-                x = torch.cat((resized_images, x), dim = 1)
+                images_to_concat = rgbs_index.get(resolution, None)
+
+                if not exists(images_to_concat):
+                    # if no rgbs passed in, assume all real images, and just resize, though realistically you would concat fake and real images together using helper function `create_real_fake_rgbs` function
+                    images_to_concat = self.resize_image_to(images, resolution)
+
+                x = torch.cat((images_to_concat, x), dim = 1)
 
             residual = residual_fn(x)
             x = block(x)
@@ -1305,8 +1344,8 @@ class Discriminator(nn.Module):
 
 # gan
 
-@beartype
 class GigaGAN(nn.Module):
+    @beartype
     def __init__(
         self,
         *,
