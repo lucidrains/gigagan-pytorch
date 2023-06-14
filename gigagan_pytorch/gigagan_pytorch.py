@@ -260,17 +260,17 @@ class SelfAttention(nn.Module):
         dim,
         dim_head = 64,
         heads = 8,
-        mask_self_value = -1e2
+        dot_product = False
     ):
         super().__init__()
         self.heads = heads
         self.scale = dim_head ** -0.5
         dim_inner = dim_head * heads
 
-        self.mask_self_value = mask_self_value
-
         self.norm = ChannelRMSNorm(dim)
-        self.to_qk = nn.Conv2d(dim, dim_inner, 1, bias = False)
+
+        self.to_q = nn.Conv2d(dim, dim_inner, 1, bias = False)
+        self.to_k = nn.Conv2d(dim, dim_inner, 1, bias = False) if dot_product else None
         self.to_v = nn.Conv2d(dim, dim_inner, 1, bias = False)
 
         self.null_kv = nn.Parameter(torch.randn(2, heads, dim_head))
@@ -297,10 +297,11 @@ class SelfAttention(nn.Module):
 
         h = self.heads
 
-        qk, v = self.to_qk(fmap), self.to_v(fmap)
-        qk, v = map(lambda t: rearrange(t, 'b (h d) x y -> (b h) (x y) d', h = self.heads), (qk, v))
+        q, v = self.to_q(fmap), self.to_v(fmap)
 
-        q, k = qk, qk
+        k = self.to_k(fmap) if exists(self.to_k) else q
+
+        q, k, v = map(lambda t: rearrange(t, 'b (h d) x y -> (b h) (x y) d', h = self.heads), (q, k, v))
 
         # add a null key / value, so network can choose to pay attention to nothing
 
@@ -311,15 +312,7 @@ class SelfAttention(nn.Module):
 
         # l2 distance
 
-        sim = -torch.cdist(q, k, p = 2) * self.scale
-
-        # following what was done in reformer for shared query / key space
-        # omit attention to self
-
-        self_mask = torch.eye(sim.shape[-2], device = device, dtype = torch.bool)
-        self_mask = F.pad(self_mask, (1, 0), value = False)
-
-        sim = sim.masked_fill(self_mask, self.mask_self_value)
+        sim = -(torch.cdist(q, k, p = 2) ** 2) * self.scale
 
         # attention
 
@@ -378,7 +371,7 @@ class CrossAttention(nn.Module):
 
         q = rearrange(q, 'b (h d) x y -> (b h) (x y) d', h = self.heads)
 
-        sim = -torch.cdist(q, k, p = 2) * self.scale # l2 distance
+        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
 
         if exists(mask):
             mask = repeat(mask, 'b j -> (b h) 1 j', h = self.heads)
@@ -501,10 +494,11 @@ class SelfAttentionBlock(nn.Module):
         dim,
         dim_head = 64,
         heads = 8,
-        ff_mult = 4
+        ff_mult = 4,
+        dot_product = False
     ):
         super().__init__()
-        self.attn = SelfAttention(dim = dim, dim_head = dim_head, heads = heads)
+        self.attn = SelfAttention(dim = dim, dim_head = dim_head, heads = heads, dot_product = dot_product)
         self.ff = FeedForward(dim = dim, mult = ff_mult, channel_first = True)
 
     def forward(self, x):
@@ -672,6 +666,7 @@ class Generator(nn.Module):
         self_attn_resolutions: Tuple[int, ...] = (32, 16),
         self_attn_dim_head = 64,
         self_attn_heads = 8,
+        self_attn_dot_product = True,
         self_ff_mult = 4,
         cross_attn_resolutions: Tuple[int, ...] = (32, 16),
         cross_attn_dim_head = 64,
@@ -774,7 +769,7 @@ class Generator(nn.Module):
                 rgb_upsample = Upsample(channels)
 
             if has_self_attn:
-                self_attn = SelfAttentionBlock(dim_out)
+                self_attn = SelfAttentionBlock(dim_out, dot_product = self_attn_dot_product)
 
             if has_cross_attn:
                 cross_attn = CrossAttentionBlock(dim_out, dim_context = text_encoder.dim)
@@ -1104,6 +1099,7 @@ class Discriminator(nn.Module):
         attn_resolutions: Tuple[int] = (32, 16),
         attn_dim_head = 64,
         attn_heads = 8,
+        self_attn_dot_product = False,
         ff_mult = 4,
         text_encoder: Optional[TextEncoder] = None,
         text_dim = None,
@@ -1217,7 +1213,7 @@ class Discriminator(nn.Module):
                 skip_squeeze_excite,
                 resnet_block,
                 residual_conv,
-                SelfAttentionBlock(dim_out, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult) if has_attn else None,
+                SelfAttentionBlock(dim_out, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult, dot_product = self_attn_dot_product) if has_attn else None,
                 multiscale_output_predictor,
                 aux_recon_decoder,
                 Downsample(dim_out) if should_downsample else None,
@@ -1273,6 +1269,8 @@ class Discriminator(nn.Module):
 
         has_real_images = exists(real_images)
         x = torch.cat((x, real_images), dim = 0)
+
+        aux_recon_target = x
 
         assert not (has_real_images and not exists(rgbs)) 
 
@@ -1335,7 +1333,7 @@ class Discriminator(nn.Module):
             x = x * self.residual_scale
 
             if exists(recon_decoder):
-                aux_recon_loss = recon_decoder(x, images)
+                aux_recon_loss = recon_decoder(x, aux_recon_target)
                 aux_recon_losses.append(aux_recon_loss)
 
         logits = self.to_logits(x)   
