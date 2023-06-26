@@ -891,9 +891,9 @@ class Generator(nn.Module):
 
             layer_rgb = to_rgb_conv(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
 
-            rgbs.append(layer_rgb)
-
             rgb = rgb + layer_rgb
+
+            rgbs.append(rgb)
 
             if exists(upsample):
                 x = upsample(x)
