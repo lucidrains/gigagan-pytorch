@@ -216,7 +216,7 @@ class UnetUpsampler(nn.Module):
         assert input_image_size < image_size, 'input image size must be smaller than the output image size, thus upsampling'
 
         num_layer_no_downsample = int(log2(image_size) - log2(input_image_size))
-        assert num_layer_no_downsample <= (len(dim_mults) - 1), 'you need more stages in this unet for the level of upsampling'
+        assert num_layer_no_downsample <= len(dim_mults), 'you need more stages in this unet for the level of upsampling'
 
         # determine dimensions
 
@@ -249,7 +249,7 @@ class UnetUpsampler(nn.Module):
 
         for ind, ((dim_in, dim_out), layer_full_attn) in enumerate(zip(in_out, full_attn)):
             is_last = ind >= (num_resolutions - 1)
-            should_not_downsample = ind < num_layer_no_downsample or is_last
+            should_not_downsample = ind < num_layer_no_downsample
 
             attn_klass = FullAttention if layer_full_attn else LinearAttention
 
@@ -265,15 +265,13 @@ class UnetUpsampler(nn.Module):
         self.mid_block2 = block_klass(mid_dim, mid_dim)
 
         for ind, ((dim_in, dim_out), layer_full_attn) in enumerate(zip(reversed(in_out), reversed(full_attn))):
-            is_last = ind == (len(in_out) - 1)
-
             attn_klass = FullAttention if layer_full_attn else LinearAttention
 
             self.ups.append(nn.ModuleList([
-                block_klass(dim_out + dim_in, dim_out),
-                block_klass(dim_out + dim_in, dim_out),
-                attn_klass(dim_out),
-                Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
+                Upsample(dim_out, dim_in),
+                block_klass(dim_in * 2, dim_in),
+                block_klass(dim_in * 2, dim_in),
+                attn_klass(dim_in),
             ]))
 
         self.out_dim = default(out_dim, channels)
@@ -308,25 +306,27 @@ class UnetUpsampler(nn.Module):
         x = self.mid_attn(x) + x
         x = self.mid_block2(x)
 
-        for block1, block2, attn, upsample in self.ups:
-            residual1 = h.pop()
-            residual2 = h.pop()
-
-            fmap_size = x.shape[-1]
-            residual_fmap_size = residual1.shape[-1]
-
-            if residual_fmap_size != fmap_size:
-                residual1 = self.resize_image_to(residual1, fmap_size)
-                residual2 = self.resize_image_to(residual2, fmap_size)
-
-            x = torch.cat((x, residual1), dim = 1)
-            x = block1(x)
-
-            x = torch.cat((x, residual2), dim = 1)
-            x = block2(x)
-            x = attn(x) + x
+        for upsample, block1, block2, attn in self.ups:
 
             x = upsample(x)
+
+            res1 = h.pop()
+            res2 = h.pop()
+
+            fmap_size = x.shape[-1]
+            residual_fmap_size = res1.shape[-1]
+
+            if residual_fmap_size != fmap_size:
+                res1 = self.resize_image_to(res1, fmap_size)
+                res2 = self.resize_image_to(res2, fmap_size)
+
+            x = torch.cat((x, res1), dim = 1)
+            x = block1(x)
+
+            x = torch.cat((x, res2), dim = 1)
+            x = block2(x)
+
+            x = attn(x) + x
 
         x = self.final_res_block(x)
         return self.final_conv(x)
