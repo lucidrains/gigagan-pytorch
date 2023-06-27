@@ -303,7 +303,8 @@ class UnetUpsampler(nn.Module):
         x,
         return_all_rgbs = False
     ):
-        assert x.shape[-2:] == ((self.input_image_size,) * 2)
+        shape = x.shape
+        assert shape[-2:] == ((self.input_image_size,) * 2)
 
         x = self.init_conv(x)
 
@@ -369,5 +370,9 @@ class UnetUpsampler(nn.Module):
 
         if not return_all_rgbs:
             return rgb
+
+        # only keep those rgbs whose feature map is greater than the input image to be upsampled
+
+        rgbs = list(filter(lambda t: t.shape[-1] >= shape[-1], rgbs))
 
         return rgb, rgbs

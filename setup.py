@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'gigagan-pytorch',
   packages = find_packages(exclude=[]),
-  version = '0.0.23',
+  version = '0.0.24',
   license='MIT',
   description = 'GigaGAN - Pytorch',
   author = 'Phil Wang',
