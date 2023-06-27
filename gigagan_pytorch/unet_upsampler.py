@@ -218,6 +218,9 @@ class UnetUpsampler(nn.Module):
         num_layer_no_downsample = int(log2(image_size) - log2(input_image_size))
         assert num_layer_no_downsample <= len(dim_mults), 'you need more stages in this unet for the level of upsampling'
 
+        self.image_size = image_size
+        self.input_image_size = input_image_size
+
         # determine dimensions
 
         self.channels = channels
@@ -263,12 +266,15 @@ class UnetUpsampler(nn.Module):
         self.mid_block1 = block_klass(mid_dim, mid_dim)
         self.mid_attn = FullAttention(mid_dim)
         self.mid_block2 = block_klass(mid_dim, mid_dim)
+        self.mid_to_rgb = nn.Conv2d(mid_dim, channels, 1)
 
         for ind, ((dim_in, dim_out), layer_full_attn) in enumerate(zip(reversed(in_out), reversed(full_attn))):
             attn_klass = FullAttention if layer_full_attn else LinearAttention
 
             self.ups.append(nn.ModuleList([
                 Upsample(dim_out, dim_in),
+                Upsample(channels),
+                nn.Conv2d(dim_in, channels, 1),
                 block_klass(dim_in * 2, dim_in),
                 block_klass(dim_in * 2, dim_in),
                 attn_klass(dim_in),
@@ -277,20 +283,33 @@ class UnetUpsampler(nn.Module):
         self.out_dim = default(out_dim, channels)
 
         self.final_res_block = block_klass(dim, dim)
+        self.final_to_rgb = nn.Conv2d(dim, channels, 1)
+
         self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
 
         # resize mode
 
         self.resize_mode = resize_mode
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def resize_image_to(self, x, size):
         return F.interpolate(x, (size, size), mode = self.resize_mode)
 
-    def forward(self, x):
+    def forward(
+        self,
+        x,
+        return_all_rgbs = False
+    ):
+        assert x.shape[-2:] == ((self.input_image_size,) * 2)
+
         x = self.init_conv(x)
-        r = x.clone()
 
         h = []
+
+        # downsample stages
 
         for block1, block2, attn, downsample in self.downs:
             x = block1(x)
@@ -306,9 +325,22 @@ class UnetUpsampler(nn.Module):
         x = self.mid_attn(x) + x
         x = self.mid_block2(x)
 
-        for upsample, block1, block2, attn in self.ups:
+        # rgbs
+
+        rgbs = []
+
+        init_rgb_shape = list(x.shape)
+        init_rgb_shape[1] = self.channels
+
+        rgb = self.mid_to_rgb(x)
+        rgbs.append(rgb)
+
+        # upsample stages
+
+        for upsample, upsample_rgb, to_rgb, block1, block2, attn in self.ups:
 
             x = upsample(x)
+            rgb = upsample_rgb(rgb)
 
             res1 = h.pop()
             res2 = h.pop()
@@ -328,5 +360,14 @@ class UnetUpsampler(nn.Module):
 
             x = attn(x) + x
 
+            rgb = rgb + to_rgb(x)
+            rgbs.append(rgb)
+
         x = self.final_res_block(x)
-        return self.final_conv(x)
+
+        rgb = rgb + self.final_to_rgb(x)
+
+        if not return_all_rgbs:
+            return rgb
+
+        return rgb, rgbs
