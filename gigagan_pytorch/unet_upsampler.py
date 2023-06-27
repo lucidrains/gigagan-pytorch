@@ -36,11 +36,31 @@ def is_power_of_two(n):
 
 # small helper modules
 
-def Upsample(dim, dim_out = None):
-    return nn.Sequential(
-        nn.Upsample(scale_factor = 2, mode = 'nearest'),
-        nn.Conv2d(dim, default(dim_out, dim), 3, padding = 1)
-    )
+class Upsample(nn.Module):
+    def __init__(self, dim, dim_out = None):
+        super().__init__()
+        dim_out = default(dim_out, dim)
+
+        conv = nn.Conv2d(dim, dim_out * 4, 1)
+        self.init_conv_(conv)
+
+        self.net = nn.Sequential(
+            conv,
+            nn.SiLU(),
+            nn.PixelShuffle(2)
+        )
+
+    def init_conv_(self, conv):
+        o, *rest_shape = conv.weight.shape
+        conv_weight = torch.empty(o // 4, *rest_shape)
+        nn.init.kaiming_uniform_(conv_weight)
+        conv_weight = repeat(conv_weight, 'o ... -> (o 4) ...')
+
+        conv.weight.data.copy_(conv_weight)
+        nn.init.zeros_(conv.bias.data)
+
+    def forward(self, x):
+        return self.net(x)
 
 def Downsample(dim, dim_out = None):
     return nn.Sequential(
@@ -187,7 +207,8 @@ class UnetUpsampler(nn.Module):
         channels = 3,
         resnet_block_groups = 8,
         full_attn = (False, False, False, True),
-        flash_attn = True
+        flash_attn = True,
+        resize_mode = 'bilinear'
     ):
         super().__init__()
 
@@ -260,6 +281,13 @@ class UnetUpsampler(nn.Module):
         self.final_res_block = block_klass(dim, dim)
         self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
 
+        # resize mode
+
+        self.resize_mode = resize_mode
+
+    def resize_image_to(self, x, size):
+        return F.interpolate(x, (size, size), mode = self.resize_mode)
+
     def forward(self, x):
         x = self.init_conv(x)
         r = x.clone()
@@ -288,8 +316,8 @@ class UnetUpsampler(nn.Module):
             residual_fmap_size = residual1.shape[-1]
 
             if residual_fmap_size != fmap_size:
-                residual1 = F.interpolate(residual1, (fmap_size, fmap_size), mode = 'nearest')
-                residual2 = F.interpolate(residual2, (fmap_size, fmap_size), mode = 'nearest')
+                residual1 = self.resize_image_to(residual1, fmap_size)
+                residual2 = self.resize_image_to(residual2, fmap_size)
 
             x = torch.cat((x, residual1), dim = 1)
             x = block1(x)
