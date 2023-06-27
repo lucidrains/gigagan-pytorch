@@ -11,7 +11,10 @@ from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange
 
 from gigagan_pytorch.attend import Attend
+from gigagan_pytorch.gigagan_pytorch import StyleNetwork, AdaptiveConv2DMod
 
+from beartype.typing import Optional, List
+from collections.abc import Iterable
 
 # helpers functions
 
@@ -33,6 +36,10 @@ def identity(t, *args, **kwargs):
 
 def is_power_of_two(n):
     return log2(n).is_integer()
+
+def null_iterator():
+    while True:
+        yield None
 
 # small helper modules
 
@@ -79,46 +86,64 @@ class RMSNorm(nn.Module):
 # building block modules
 
 class Block(nn.Module):
-    def __init__(self, dim, dim_out, groups = 8):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        groups = 8,
+        num_conv_kernels = 0
+    ):
         super().__init__()
-        self.proj = nn.Conv2d(dim, dim_out, 3, padding = 1)
+        self.proj = AdaptiveConv2DMod(dim, dim_out, kernel = 3, num_conv_kernels = num_conv_kernels)
         self.norm = nn.GroupNorm(groups, dim_out)
         self.act = nn.SiLU()
 
-    def forward(self, x, scale_shift = None):
-        x = self.proj(x)
+    def forward(
+        self,
+        x,
+        conv_mods_iter: Optional[Iterable] = None
+    ):
+        conv_mods_iter = default(conv_mods_iter, null_iterator())
+
+        x = self.proj(
+            x,
+            mod = next(conv_mods_iter),
+            kernel_mod = next(conv_mods_iter)
+        )
+
         x = self.norm(x)
-
-        if exists(scale_shift):
-            scale, shift = scale_shift
-            x = x * (scale + 1) + shift
-
         x = self.act(x)
         return x
 
 class ResnetBlock(nn.Module):
-    def __init__(self, dim, dim_out, *, time_emb_dim = None, groups = 8):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        *,
+        groups = 8,
+        num_conv_kernels = 0,
+        style_dims: List = []
+    ):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(time_emb_dim, dim_out * 2)
-        ) if exists(time_emb_dim) else None
+        style_dims.extend([
+            dim,
+            num_conv_kernels,
+            dim_out,
+            num_conv_kernels
+        ])
 
-        self.block1 = Block(dim, dim_out, groups = groups)
-        self.block2 = Block(dim_out, dim_out, groups = groups)
+        self.block1 = Block(dim, dim_out, groups = groups, num_conv_kernels = num_conv_kernels)
+        self.block2 = Block(dim_out, dim_out, groups = groups, num_conv_kernels = num_conv_kernels)
         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
-    def forward(self, x, time_emb = None):
-
-        scale_shift = None
-        if exists(self.mlp) and exists(time_emb):
-            time_emb = self.mlp(time_emb)
-            time_emb = rearrange(time_emb, 'b c -> b c 1 1')
-            scale_shift = time_emb.chunk(2, dim = 1)
-
-        h = self.block1(x, scale_shift = scale_shift)
-
-        h = self.block2(h)
+    def forward(
+        self,
+        x,
+        conv_mods_iter: Optional[Iterable] = None
+    ):
+        h = self.block1(x, conv_mods_iter = conv_mods_iter)
+        h = self.block2(h, conv_mods_iter = conv_mods_iter)
 
         return h + self.res_conv(x)
 
@@ -203,6 +228,7 @@ class UnetUpsampler(nn.Module):
         input_image_size,
         init_dim = None,
         out_dim = None,
+        style_network: Optional[StyleNetwork] = None,
         dim_mults = (1, 2, 4, 8),
         channels = 3,
         resnet_block_groups = 8,
@@ -210,9 +236,14 @@ class UnetUpsampler(nn.Module):
         flash_attn = True,
         attn_dim_head = 64,
         attn_heads = 8,
+        num_conv_kernels = 2,
         resize_mode = 'bilinear'
     ):
         super().__init__()
+
+        # style network
+
+        self.style_network = style_network
 
         assert is_power_of_two(image_size) and is_power_of_two(input_image_size), 'both output image size and input image size must be power of 2'
         assert input_image_size < image_size, 'input image size must be smaller than the output image size, thus upsampling'
@@ -222,6 +253,12 @@ class UnetUpsampler(nn.Module):
 
         self.image_size = image_size
         self.input_image_size = input_image_size
+
+        # setup adaptive conv
+
+        is_adaptive = num_conv_kernels > 1
+        dim_kernel_mod = num_conv_kernels if is_adaptive else 0
+        style_embed_split_dims = []
 
         # determine dimensions
 
@@ -237,7 +274,12 @@ class UnetUpsampler(nn.Module):
 
         in_out = list(zip(dims[:-1], dims[1:]))
 
-        block_klass = partial(ResnetBlock, groups = resnet_block_groups)
+        block_klass = partial(
+            ResnetBlock,
+            groups = resnet_block_groups,
+            num_conv_kernels = num_conv_kernels,
+            style_dims = style_embed_split_dims
+        )
 
         # attention
 
@@ -285,13 +327,18 @@ class UnetUpsampler(nn.Module):
         self.out_dim = default(out_dim, channels)
 
         self.final_res_block = block_klass(dim, dim)
-        self.final_to_rgb = nn.Conv2d(dim, channels, 1)
 
+        self.final_to_rgb = nn.Conv2d(dim, channels, 1)
         self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
 
         # resize mode
 
         self.resize_mode = resize_mode
+
+        # determine the projection of the style embedding to convolutional modulation weights (+ adaptive kernel selection weights) for all layers
+
+        self.style_to_conv_modulations = nn.Linear(style_network.dim, sum(style_embed_split_dims))
+        self.style_embed_split_dims = style_embed_split_dims
 
     @property
     def device(self):
@@ -303,10 +350,29 @@ class UnetUpsampler(nn.Module):
     def forward(
         self,
         x,
+        noise = None,
+        styles = None,
         return_all_rgbs = False
     ):
         shape = x.shape
+        batch_size = shape[0]
+
         assert shape[-2:] == ((self.input_image_size,) * 2)
+
+        # styles
+
+        if not exists(styles):
+            assert exists(self.style_network)
+            noise = default(noise, torch.randn((batch_size, self.style_network.dim), device = self.device))
+            styles = self.style_network(noise)
+
+        # project styles to conv modulations
+
+        conv_mods = self.style_to_conv_modulations(styles)
+        conv_mods = conv_mods.split(self.style_embed_split_dims, dim = -1)
+        conv_mods = iter(conv_mods)
+
+        # initial conv
 
         x = self.init_conv(x)
 
@@ -315,18 +381,18 @@ class UnetUpsampler(nn.Module):
         # downsample stages
 
         for block1, block2, attn, downsample in self.downs:
-            x = block1(x)
+            x = block1(x, conv_mods_iter = conv_mods)
             h.append(x)
 
-            x = block2(x)
+            x = block2(x, conv_mods_iter = conv_mods)
             x = attn(x) + x
             h.append(x)
 
             x = downsample(x)
 
-        x = self.mid_block1(x)
+        x = self.mid_block1(x, conv_mods_iter = conv_mods)
         x = self.mid_attn(x) + x
-        x = self.mid_block2(x)
+        x = self.mid_block2(x, conv_mods_iter = conv_mods)
 
         # rgbs
 
@@ -356,17 +422,17 @@ class UnetUpsampler(nn.Module):
                 res2 = self.resize_image_to(res2, fmap_size)
 
             x = torch.cat((x, res1), dim = 1)
-            x = block1(x)
+            x = block1(x, conv_mods_iter = conv_mods)
 
             x = torch.cat((x, res2), dim = 1)
-            x = block2(x)
+            x = block2(x, conv_mods_iter = conv_mods)
 
             x = attn(x) + x
 
             rgb = rgb + to_rgb(x)
             rgbs.append(rgb)
 
-        x = self.final_res_block(x)
+        x = self.final_res_block(x, conv_mods_iter = conv_mods)
 
         rgb = rgb + self.final_to_rgb(x)
 
