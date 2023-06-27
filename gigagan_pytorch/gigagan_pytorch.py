@@ -1284,7 +1284,7 @@ class Discriminator(nn.Module):
         assert not (has_real_images and not exists(rgbs)) 
 
         if has_real_images:
-            rgbs = [torch.cat((rgb, self.resize_image_to(rgb, rgb.shape[-1])), dim = 0) for rgb in rgbs]
+            rgbs = [torch.cat((rgb, self.resize_image_to(real_images, rgb.shape[-1])), dim = 0) for rgb in rgbs]
 
         # index the rgbs by resolution
 
