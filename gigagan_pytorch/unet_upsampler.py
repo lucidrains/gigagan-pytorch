@@ -208,6 +208,8 @@ class UnetUpsampler(nn.Module):
         resnet_block_groups = 8,
         full_attn = (False, False, False, True),
         flash_attn = True,
+        attn_dim_head = 64,
+        attn_heads = 8,
         resize_mode = 'bilinear'
     ):
         super().__init__()
@@ -259,7 +261,7 @@ class UnetUpsampler(nn.Module):
             self.downs.append(nn.ModuleList([
                 block_klass(dim_in, dim_in),
                 block_klass(dim_in, dim_in),
-                attn_klass(dim_in),
+                attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads),
                 Downsample(dim_in, dim_out) if not should_not_downsample else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
             ]))
 
@@ -277,7 +279,7 @@ class UnetUpsampler(nn.Module):
                 nn.Conv2d(dim_in, channels, 1),
                 block_klass(dim_in * 2, dim_in),
                 block_klass(dim_in * 2, dim_in),
-                attn_klass(dim_in),
+                attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads),
             ]))
 
         self.out_dim = default(out_dim, channels)
