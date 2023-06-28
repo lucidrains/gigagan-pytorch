@@ -217,6 +217,69 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h (x y) d -> b (h d) x y', x = h, y = w)
         return self.to_out(out)
 
+# feedforward
+
+def FeedForward(dim, mult = 4):
+    return nn.Sequential(
+        RMSNorm(dim),
+        nn.Conv2d(dim, dim * mult, 1),
+        nn.GELU(),
+        nn.Conv2d(dim * mult, dim, 1)
+    )
+
+# transformers
+
+class Transformer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        depth = 1,
+        flash_attn = True,
+        ff_mult = 4
+    ):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                Attention(dim = dim, dim_head = dim_head, heads = heads, flash = flash_attn),
+                FeedForward(dim = dim, mult = ff_mult)
+            ]))
+
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+
+        return x
+
+class LinearTransformer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        depth = 1,
+        ff_mult = 4
+    ):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                LinearAttention(dim = dim, dim_head = dim_head, heads = heads),
+                FeedForward(dim = dim, mult = ff_mult)
+            ]))
+
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+
+        return x
+
 # model
 
 class UnetUpsampler(nn.Module):
@@ -236,6 +299,8 @@ class UnetUpsampler(nn.Module):
         flash_attn = True,
         attn_dim_head = 64,
         attn_heads = 8,
+        attn_depths = (1, 1, 1, 1),
+        mid_attn_depth = 1,
         num_conv_kernels = 2,
         resize_mode = 'bilinear'
     ):
@@ -286,7 +351,7 @@ class UnetUpsampler(nn.Module):
         full_attn = cast_tuple(full_attn, length = len(dim_mults))
         assert len(full_attn) == len(dim_mults)
 
-        FullAttention = partial(Attention, flash = flash_attn)
+        FullAttention = partial(Transformer, flash_attn = flash_attn)
 
         # layers
 
@@ -294,26 +359,26 @@ class UnetUpsampler(nn.Module):
         self.ups = nn.ModuleList([])
         num_resolutions = len(in_out)
 
-        for ind, ((dim_in, dim_out), layer_full_attn) in enumerate(zip(in_out, full_attn)):
+        for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_depth) in enumerate(zip(in_out, full_attn, attn_depths)):
             is_last = ind >= (num_resolutions - 1)
             should_not_downsample = ind < num_layer_no_downsample
 
-            attn_klass = FullAttention if layer_full_attn else LinearAttention
+            attn_klass = FullAttention if layer_full_attn else LinearTransformer
 
             self.downs.append(nn.ModuleList([
                 block_klass(dim_in, dim_in),
                 block_klass(dim_in, dim_in),
-                attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads),
+                attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads, depth = layer_attn_depth),
                 Downsample(dim_in, dim_out) if not should_not_downsample else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
             ]))
 
         self.mid_block1 = block_klass(mid_dim, mid_dim)
-        self.mid_attn = FullAttention(mid_dim)
+        self.mid_attn = FullAttention(mid_dim, dim_head = attn_dim_head, heads = attn_heads, depth = mid_attn_depth)
         self.mid_block2 = block_klass(mid_dim, mid_dim)
         self.mid_to_rgb = nn.Conv2d(mid_dim, channels, 1)
 
-        for ind, ((dim_in, dim_out), layer_full_attn) in enumerate(zip(reversed(in_out), reversed(full_attn))):
-            attn_klass = FullAttention if layer_full_attn else LinearAttention
+        for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_depth) in enumerate(zip(reversed(in_out), reversed(full_attn), reversed(attn_depths))):
+            attn_klass = FullAttention if layer_full_attn else LinearTransformer
 
             self.ups.append(nn.ModuleList([
                 Upsample(dim_out, dim_in),
@@ -321,7 +386,7 @@ class UnetUpsampler(nn.Module):
                 nn.Conv2d(dim_in, channels, 1),
                 block_klass(dim_in * 2, dim_in),
                 block_klass(dim_in * 2, dim_in),
-                attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads),
+                attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads, depth = layer_attn_depth),
             ]))
 
         self.out_dim = default(out_dim, channels)
