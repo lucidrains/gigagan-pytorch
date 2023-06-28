@@ -1188,9 +1188,21 @@ class Discriminator(nn.Module):
                 dim_skip_in, _ = dim_pairs[ind + num_skip_layers_excite]
                 skip_squeeze_excite = SqueezeExcite(dim_in, dim_skip_in)
 
+            # multi-scale rgb input to feature dimension
+
+            from_rgb = None
+            if has_multiscale_input:
+                from_rgb = nn.Conv2d(channels, dim_in, 7, padding = 3)
+
+            # dim in + channels for the main features
+
             dim_in = dim_in + (channels if has_multiscale_input else 0)
 
+            # residual convolution
+
             residual_conv = nn.Conv2d(dim_in, dim_out, 1, stride = (2 if should_downsample else 1))
+
+            # main resnet block
 
             mult = 2 if use_glu else 1
             act_fn = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
@@ -1201,6 +1213,8 @@ class Discriminator(nn.Module):
                 conv2d_3x3(dim_out, dim_out * mult),
                 act_fn()
             )
+
+            # multi-scale output
 
             multiscale_output_predictor = None
             if has_multiscale_output:
@@ -1220,6 +1234,7 @@ class Discriminator(nn.Module):
 
             self.layers.append(nn.ModuleList([
                 skip_squeeze_excite,
+                from_rgb,
                 resnet_block,
                 residual_conv,
                 SelfAttentionBlock(dim_out, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult, dot_product = self_attn_dot_product) if has_attn else None,
@@ -1272,6 +1287,8 @@ class Discriminator(nn.Module):
         else:
             assert not any([*map(exists, (texts, text_embeds))])
 
+        batch = images.shape[0]
+
         x = images
 
         # if real images are passed in, assume `images` are generated, and take care of all the multi-resolution input. this can also be done externally, in which case `real_images` will not be populated
@@ -1302,7 +1319,7 @@ class Discriminator(nn.Module):
 
         excitations = [None] * (self.num_skip_layers_excite + 1) # +1 since first image in pixel space is not excited
 
-        for squeeze_excite, block, residual_fn, attn, predictor, recon_decoder, downsample in self.layers:
+        for squeeze_excite, from_rgb, block, residual_fn, attn, predictor, recon_decoder, downsample in self.layers:
             resolution = x.shape[-1]
 
             if exists(squeeze_excite):
@@ -1311,16 +1328,29 @@ class Discriminator(nn.Module):
 
             excite = safe_unshift(excitations)
             if exists(excite):
+                excite = repeat(excite, 'b ... -> (s b) ...', s = x.shape[0] // excite.shape[0])
                 x = x * excite
 
             if resolution in self.multiscale_input_resolutions:
                 images_to_concat = rgbs_index.get(resolution, None)
 
+                # if no rgbs passed in, assume all real images, and just resize, though realistically you would concat fake and real images together using helper function `create_real_fake_rgbs` function
+
                 if not exists(images_to_concat):
-                    # if no rgbs passed in, assume all real images, and just resize, though realistically you would concat fake and real images together using helper function `create_real_fake_rgbs` function
                     images_to_concat = self.resize_image_to(images, resolution)
 
+                images_to_concat = repeat(images_to_concat, 'b ... -> (s b) ...', s = x.shape[0] // images_to_concat.shape[0])
+
+                # concat the rgb (or real images reshaped)
+
                 x = torch.cat((images_to_concat, x), dim = 1)
+
+                # concat the rgb, projected into the feature dimension space
+
+                if exists(from_rgb):
+                    multi_scale_x = from_rgb(images_to_concat)
+                    multi_scale_x = torch.cat((images_to_concat, multi_scale_x), dim = 1)
+                    x = torch.cat((x, multi_scale_x), dim = 0)
 
             residual = residual_fn(x)
             x = block(x)
@@ -1342,10 +1372,12 @@ class Discriminator(nn.Module):
             x = x * self.residual_scale
 
             if exists(recon_decoder):
+                aux_recon_target = repeat(aux_recon_target, 'b ... -> (s b) ...', s = x.shape[0] // aux_recon_target.shape[0])
                 aux_recon_loss = recon_decoder(x, aux_recon_target)
                 aux_recon_losses.append(aux_recon_loss)
 
         logits = self.to_logits(x)   
+        logits = rearrange(logits, '(s b) ... -> s b ...', b = batch)
 
         return logits, multiscale_outputs, aux_recon_losses
 
