@@ -9,8 +9,14 @@ from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
 from gigagan_pytorch.attend import Attend
-from gigagan_pytorch.gigagan_pytorch import StyleNetwork, AdaptiveConv2DMod
+from gigagan_pytorch.gigagan_pytorch import (
+    StyleNetwork,
+    AdaptiveConv2DMod,
+    TextEncoder,
+    CrossAttentionBlock
+)
 
+from beartype import beartype
 from beartype.typing import Optional, List
 from collections.abc import Iterable
 
@@ -281,6 +287,8 @@ class LinearTransformer(nn.Module):
 # model
 
 class UnetUpsampler(nn.Module):
+
+    @beartype
     def __init__(
         self,
         dim,
@@ -289,24 +297,39 @@ class UnetUpsampler(nn.Module):
         input_image_size,
         init_dim = None,
         out_dim = None,
+        text_encoder: Optional[TextEncoder] = None,
         style_network: Optional[StyleNetwork] = None,
         dim_mults = (1, 2, 4, 8),
         channels = 3,
         resnet_block_groups = 8,
         full_attn = (False, False, False, True),
+        cross_attn = (False, False, False, True),
         flash_attn = True,
         attn_dim_head = 64,
         attn_heads = 8,
         attn_depths = (1, 1, 1, 1),
+        cross_attn_dim_head = 64,
+        cross_attn_heads = 8,
+        cross_ff_mult = 4,
+        ff_mult = 4,
         mid_attn_depth = 1,
         num_conv_kernels = 2,
-        resize_mode = 'bilinear'
+        resize_mode = 'bilinear',
+        unconditional = True
     ):
         super().__init__()
 
         # style network
 
+        self.text_encoder = text_encoder
         self.style_network = style_network
+
+        # validate text conditioning and style network hparams
+
+        self.unconditional = unconditional
+        assert unconditional ^ exists(text_encoder), 'if unconditional, text encoder should not be given, and vice versa'
+        assert not (unconditional and exists(style_network) and style_network.dim_text_latent > 0)
+        assert unconditional or text_encoder.dim == style_network.dim_text_latent, 'the `dim_text_latent` on your StyleNetwork must be equal to the `dim` set for the TextEncoder'
 
         assert is_power_of_two(image_size) and is_power_of_two(input_image_size), 'both output image size and input image size must be power of 2'
         assert input_image_size < image_size, 'input image size must be smaller than the output image size, thus upsampling'
@@ -349,21 +372,27 @@ class UnetUpsampler(nn.Module):
 
         FullAttention = partial(Transformer, flash_attn = flash_attn)
 
+        cross_attn = cast_tuple(cross_attn, length = len(dim_mults))
+        assert unconditional or len(full_attn) == len(dim_mults)
+
         # layers
 
         self.downs = nn.ModuleList([])
         self.ups = nn.ModuleList([])
         num_resolutions = len(in_out)
 
-        for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_depth) in enumerate(zip(in_out, full_attn, attn_depths)):
+        for ind, ((dim_in, dim_out), layer_full_attn, layer_cross_attn, layer_attn_depth) in enumerate(zip(in_out, full_attn, cross_attn, attn_depths)):
             ind >= (num_resolutions - 1)
+
             should_not_downsample = ind < num_layer_no_downsample
+            has_cross_attn = not self.unconditional and layer_cross_attn
 
             attn_klass = FullAttention if layer_full_attn else LinearTransformer
 
             self.downs.append(nn.ModuleList([
                 block_klass(dim_in, dim_in),
                 block_klass(dim_in, dim_in),
+                CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = attn_dim_head, heads = attn_heads, ff_mult = ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads, depth = layer_attn_depth),
                 Downsample(dim_in, dim_out) if not should_not_downsample else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
             ]))
@@ -373,8 +402,10 @@ class UnetUpsampler(nn.Module):
         self.mid_block2 = block_klass(mid_dim, mid_dim)
         self.mid_to_rgb = nn.Conv2d(mid_dim, channels, 1)
 
-        for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_depth) in enumerate(zip(reversed(in_out), reversed(full_attn), reversed(attn_depths))):
+        for ind, ((dim_in, dim_out), layer_cross_attn, layer_full_attn, layer_attn_depth) in enumerate(zip(reversed(in_out), reversed(full_attn), reversed(cross_attn), reversed(attn_depths))):
+
             attn_klass = FullAttention if layer_full_attn else LinearTransformer
+            has_cross_attn = not self.unconditional and layer_cross_attn
 
             self.ups.append(nn.ModuleList([
                 Upsample(dim_out, dim_in),
@@ -382,6 +413,7 @@ class UnetUpsampler(nn.Module):
                 nn.Conv2d(dim_in, channels, 1),
                 block_klass(dim_in * 2, dim_in),
                 block_klass(dim_in * 2, dim_in),
+                CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = attn_dim_head, heads = attn_heads, ff_mult = ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads, depth = layer_attn_depth),
             ]))
 
@@ -411,8 +443,12 @@ class UnetUpsampler(nn.Module):
     def forward(
         self,
         x,
-        noise = None,
         styles = None,
+        noise = None,
+        texts: Optional[List[str]] = None,
+        global_text_tokens = None,
+        fine_text_tokens = None,
+        text_mask = None,
         return_all_rgbs = False
     ):
         shape = x.shape
@@ -420,12 +456,26 @@ class UnetUpsampler(nn.Module):
 
         assert shape[-2:] == ((self.input_image_size,) * 2)
 
+        # take care of text encodings
+        # which requires global text tokens to adaptively select the kernels from the main contribution in the paper
+        # and fine text tokens to attend to using cross attention
+
+        if not self.unconditional:
+            if exists(texts):
+                assert exists(self.text_encoder)
+                global_text_tokens, fine_text_tokens, text_mask = self.text_encoder(texts)
+            else:
+                assert all([*map(exists, (global_text_tokens, fine_text_tokens, text_mask))])
+        else:
+            assert not any([*map(exists, (texts, global_text_tokens, fine_text_tokens))])
+
         # styles
 
         if not exists(styles):
             assert exists(self.style_network)
+
             noise = default(noise, torch.randn((batch_size, self.style_network.dim), device = self.device))
-            styles = self.style_network(noise)
+            styles = self.style_network(noise, global_text_tokens)
 
         # project styles to conv modulations
 
@@ -441,11 +491,15 @@ class UnetUpsampler(nn.Module):
 
         # downsample stages
 
-        for block1, block2, attn, downsample in self.downs:
+        for block1, block2, cross_attn, attn, downsample in self.downs:
             x = block1(x, conv_mods_iter = conv_mods)
             h.append(x)
 
             x = block2(x, conv_mods_iter = conv_mods)
+
+            if exists(cross_attn):
+                x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
+
             x = attn(x) + x
             h.append(x)
 
@@ -467,7 +521,7 @@ class UnetUpsampler(nn.Module):
 
         # upsample stages
 
-        for upsample, upsample_rgb, to_rgb, block1, block2, attn in self.ups:
+        for upsample, upsample_rgb, to_rgb, block1, block2, cross_attn, attn in self.ups:
 
             x = upsample(x)
             rgb = upsample_rgb(rgb)
@@ -487,6 +541,9 @@ class UnetUpsampler(nn.Module):
 
             x = torch.cat((x, res2), dim = 1)
             x = block2(x, conv_mods_iter = conv_mods)
+
+            if exists(cross_attn):
+                x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
 
             x = attn(x) + x
 

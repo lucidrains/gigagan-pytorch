@@ -3,7 +3,8 @@ from gigagan_pytorch.gigagan_pytorch import (
     Generator,
     Discriminator,
     AdaptiveConv2DMod,
-    StyleNetwork
+    StyleNetwork,
+    TextEncoder
 )
 
 from gigagan_pytorch.unet_upsampler import UnetUpsampler
@@ -14,5 +15,6 @@ __all__ = [
     Discriminator,
     AdaptiveConv2DMod,
     StyleNetwork,
-    UnetUpsampler
+    UnetUpsampler,
+    TextEncoder
 ]

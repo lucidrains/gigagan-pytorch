@@ -694,9 +694,10 @@ class Generator(nn.Module):
         self.text_encoder = text_encoder
 
         self.unconditional = unconditional
+
         assert not (unconditional and exists(text_encoder))
         assert not (unconditional and exists(style_network) and style_network.dim_text_latent > 0)
-        assert unconditional or text_encoder.dim == style_network.dim_text_latent, 'the `dim_text_latent` on your StyleNetwork must be equal to the `dim` set for the TextEncoder'
+        assert unconditional or (exists(text_encoder) and text_encoder.dim == style_network.dim_text_latent), 'the `dim_text_latent` on your StyleNetwork must be equal to the `dim` set for the TextEncoder'
 
         assert is_power_of_two(image_size)
         num_layers = int(log2(image_size) - 1)
@@ -814,8 +815,8 @@ class Generator(nn.Module):
     @beartype
     def forward(
         self,
-        noise = None,
         styles = None,
+        noise = None,
         texts: Optional[List[str]] = None,
         global_text_tokens = None,
         fine_text_tokens = None,
