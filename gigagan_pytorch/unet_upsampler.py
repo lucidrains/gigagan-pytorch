@@ -1,13 +1,11 @@
-import math
 from math import log2
-from random import random
 from functools import partial
 
 import torch
-from torch import nn, einsum
+from torch import nn
 import torch.nn.functional as F
 
-from einops import rearrange, reduce, repeat
+from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
 from gigagan_pytorch.attend import Attend
@@ -321,8 +319,6 @@ class UnetUpsampler(nn.Module):
 
         # setup adaptive conv
 
-        is_adaptive = num_conv_kernels > 1
-        dim_kernel_mod = num_conv_kernels if is_adaptive else 0
         style_embed_split_dims = []
 
         # determine dimensions
@@ -360,7 +356,7 @@ class UnetUpsampler(nn.Module):
         num_resolutions = len(in_out)
 
         for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_depth) in enumerate(zip(in_out, full_attn, attn_depths)):
-            is_last = ind >= (num_resolutions - 1)
+            ind >= (num_resolutions - 1)
             should_not_downsample = ind < num_layer_no_downsample
 
             attn_klass = FullAttention if layer_full_attn else LinearTransformer

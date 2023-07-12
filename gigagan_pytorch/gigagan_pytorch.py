@@ -55,7 +55,7 @@ def gradient_penalty(
     output,
     weight = 10
 ):
-    batch_size = images.shape[0]
+    images.shape[0]
     gradients, *_ = torch_grad(
         outputs = output,
         inputs = images,
@@ -291,7 +291,7 @@ class SelfAttention(nn.Module):
         i - source seq (attend from)
         j - target seq (attend to)
         """
-        batch, device = fmap.shape[0], fmap.device
+        batch = fmap.shape[0]
 
         fmap = self.norm(fmap)
 
@@ -736,7 +736,7 @@ class Generator(nn.Module):
         dim_layers = F.pad(dim_layers, (1, 0), value = dim_latent)
 
         dim_layers = dim_layers.tolist()
-        dim_last = dim_layers[-1]
+        dim_layers[-1]
         dim_pairs = list(zip(dim_layers[:-1], dim_layers[1:]))
 
         self.num_skip_layers_excite = num_skip_layers_excite
@@ -746,7 +746,6 @@ class Generator(nn.Module):
         # go through layers and construct all parameters
 
         for ind, ((dim_in, dim_out), resolution) in enumerate(zip(dim_pairs, resolutions)):
-            is_first = ind == 0
             is_last = (ind + 1) == len(dim_pairs)
             should_upsample = not is_last
             should_skip_layer_excite = num_skip_layers_excite > 0 and (ind + num_skip_layers_excite) < len(dim_pairs)
