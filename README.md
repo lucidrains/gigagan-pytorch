@@ -82,6 +82,11 @@ logits, *_ = gan.D(
     rgbs,
     real_images = real_images.cuda()
 )
+
+# train the generator for one step
+# will automatically update the EMA
+
+gan.train_generator_step()
 ```
 
 ## Todo

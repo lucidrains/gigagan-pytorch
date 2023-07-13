@@ -73,10 +73,10 @@ def gradient_penalty(
 
 # hinge gan losses
 
-def gen_hinge_loss(fake):
+def generator_hinge_loss(fake):
     return fake.mean()
 
-def hinge_loss(real, fake):
+def discriminator_hinge_loss(real, fake):
     return (F.relu(1 + real) + F.relu(1 - fake)).mean()
 
 # auxiliary losses
@@ -1327,7 +1327,9 @@ class Discriminator(nn.Module):
         # if real images are passed in, assume `images` are generated, and take care of all the multi-resolution input. this can also be done externally, in which case `real_images` will not be populated
 
         has_real_images = exists(real_images)
-        x = torch.cat((x, real_images), dim = 0)
+
+        if has_real_images:
+            x = torch.cat((x, real_images), dim = 0)
 
         aux_recon_target = x
 
@@ -1423,6 +1425,7 @@ class GigaGAN(nn.Module):
         *,
         generator: Union[BaseGenerator, Dict],
         discriminator: Union[Discriminator, Dict],
+        grad_accum_every = 1,
         upsampler_generator = False,
         learning_rate = 1e-4,
         betas = (0.9, 0.99),
@@ -1455,6 +1458,46 @@ class GigaGAN(nn.Module):
         self.D_opt = Adam(self.D.parameters(), lr = learning_rate, betas = betas)
 
         self.G_ema = EMA(generator, update_every = ema_update_every, update_after_step = ema_update_after_step, beta = ema_decay)
+
+        # training
+
+    def print(self, msg):
+        print(msg)
+
+    def train_generator_step(
+        self,
+        batch_size,
+        grad_accum_every = 1
+    ):
+
+        total_loss = 0.
+
+        self.G_opt.zero_grad()
+
+        for _ in range(grad_accum_every):
+            image, rgbs = self.G(
+                batch_size = 1,
+                return_all_rgbs = True
+            )
+
+            logits, *_ = self.D(
+                image,
+                rgbs
+            )
+
+            loss = generator_hinge_loss(logits)
+
+            loss = loss / grad_accum_every
+            total_loss = total_loss + loss
+
+            loss.backward()
+
+        self.G_opt.step()
+        self.print(f'G: {total_loss}')
+
+        # update exponentially moving averaged generator
+
+        self.G_ema.update()
 
     def forward(self, x):
         return x
