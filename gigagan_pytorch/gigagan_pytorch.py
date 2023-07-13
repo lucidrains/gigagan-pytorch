@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from torch import nn, einsum, Tensor
 from torch.autograd import grad as torch_grad
+from torch.utils.data import DataLoader
 
 from beartype import beartype
 from beartype.typing import List, Optional, Tuple, Dict, Union
@@ -1320,8 +1321,6 @@ class Discriminator(nn.Module):
         else:
             assert not any([*map(exists, (texts, text_embeds))])
 
-        batch = images.shape[0]
-
         x = images
 
         # if real images are passed in, assume `images` are generated, and take care of all the multi-resolution input. this can also be done externally, in which case `real_images` will not be populated
@@ -1329,7 +1328,10 @@ class Discriminator(nn.Module):
         has_real_images = exists(real_images)
 
         if has_real_images:
+            split_batch_size = (x.shape[0], real_images.shape[0])
             x = torch.cat((x, real_images), dim = 0)
+
+        batch = x.shape[0]
 
         aux_recon_target = x
 
@@ -1414,6 +1416,9 @@ class Discriminator(nn.Module):
         logits = self.to_logits(x)   
         logits = rearrange(logits, '(s b) ... -> s b ...', b = batch)
 
+        if has_real_images:
+            logits = logits.split(split_batch_size, dim = 1)
+
         return logits, multiscale_outputs, aux_recon_losses
 
 # gan
@@ -1427,10 +1432,7 @@ class GigaGAN(nn.Module):
         discriminator: Union[Discriminator, Dict],
         upsampler_generator = False,
         learning_rate = 1e-4,
-        betas = (0.9, 0.99),
-        ema_update_every = 10,
-        ema_decay = 0.995,
-        ema_update_after_step = 100
+        betas = (0.9, 0.99)
     ):
         super().__init__()
 
@@ -1456,12 +1458,68 @@ class GigaGAN(nn.Module):
         self.G_opt = Adam(self.G.parameters(), lr = learning_rate, betas = betas)
         self.D_opt = Adam(self.D.parameters(), lr = learning_rate, betas = betas)
 
-        self.G_ema = EMA(generator, update_every = ema_update_every, update_after_step = ema_update_after_step, beta = ema_decay)
+        self.has_ema_generator = False
+        self.register_buffer('steps', torch.zeros(1,))
 
-        # training
+    @property
+    def device(self):
+        return self.steps.device
+
+    def create_ema_generator(
+        self,
+        update_every = 10,
+        update_after_step = 100,
+        decay = 0.995
+    ):
+        self.has_ema_generator = True
+        self.G_ema = EMA(self.G, update_every = update_every, update_after_step = update_after_step, beta = decay)
 
     def print(self, msg):
         print(msg)
+
+    def train_discriminator_step(
+        self,
+        dataloader,
+        grad_accum_every = 1
+    ):
+        total_loss = 0.
+
+        self.D_opt.zero_grad()
+
+        for _ in range(grad_accum_every):
+            real_images = next(dataloader).to(self.device)
+
+            batch_size = real_images.shape[0]
+
+            # generator
+
+            images, rgbs = self.G(
+                batch_size = batch_size,
+                return_all_rgbs = True
+            )
+
+            # detach output of generator, as training discriminator only
+
+            images.detach_()
+            for rgb in rgbs:
+                rgb.detach_()
+
+            # discriminator
+
+            (fake_logits, real_logits), *_ = self.D(
+                images,
+                rgbs,
+                real_images = real_images
+            )
+
+            loss = discriminator_hinge_loss(real_logits, fake_logits)
+            loss = loss / grad_accum_every
+
+            total_loss = total_loss + loss
+            loss.backward()
+
+        self.D_opt.step()
+        self.print(f'D: {total_loss:.4f}')
 
     def train_generator_step(
         self,
@@ -1492,11 +1550,28 @@ class GigaGAN(nn.Module):
             loss.backward()
 
         self.G_opt.step()
-        self.print(f'G: {total_loss}')
+        self.print(f'G: {total_loss:.4f}')
 
         # update exponentially moving averaged generator
 
-        self.G_ema.update()
+        if self.has_ema_generator:
+            self.G_ema.update()
 
-    def forward(self, x):
-        return x
+    @beartype
+    def forward(
+        self,
+        *,
+        steps,
+        dataloader: DataLoader,
+        grad_accum_every = 1
+    ):
+        batch_size = dataloader.batch_size
+        dl_iter = iter(dataloader)
+
+        for _ in range(steps):
+            self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every)
+            self.train_generator_step(batch_size = batch_size)
+
+            self.steps += 1
+
+        self.print(f'complete {steps} training steps')

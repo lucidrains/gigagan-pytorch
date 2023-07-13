@@ -57,36 +57,23 @@ gan = GigaGAN(
     )
 ).cuda()
 
-# generator
-
-image, rgbs = gan.G(
-    batch_size = 1,
-    return_all_rgbs = True
-)
-
-# mock data
+# dataset
 
 dataset = ImageDataset(
-    folder = '/path/to/images',
+    folder = '/path/to/your/data',
     image_size = 256
 )
 
 dataloader = dataset.get_dataloader(batch_size = 1)
 
-real_images = next(iter(dataloader))
+# training the discriminator and generator alternating
+# for 100 steps in this example, batch size 1, gradient accumulated 8 times
 
-# discriminator
-
-logits, *_ = gan.D(
-    image,
-    rgbs,
-    real_images = real_images.cuda()
+gan(
+    dataloader = dataloader,
+    steps = 100,
+    grad_accum_every = 8
 )
-
-# train the generator for one step
-# will automatically update the EMA
-
-gan.train_generator_step()
 ```
 
 ## Todo
