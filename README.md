@@ -20,6 +20,59 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 
 - All the maintainers at <a href="https://github.com/mlfoundations/open_clip">OpenClip</a>, for their SOTA open sourced contrastive learning text-image models
 
+- <a href="https://github.com/XavierXiao">Xavier</a> for reviewing the discriminator code and pointing out that the scale invariance was not correctly built!
+
+## Usage
+
+Simple unconditional GAN, for starters
+
+```python
+import torch
+from gigagan_pytorch import GigaGAN
+
+gan = GigaGAN(
+    generator = dict(
+        dim = 64,
+        style_network = dict(
+            dim = 64,
+            depth = 4
+        ),
+        image_size = 256,
+        dim_max = 512,
+        use_glu = True,
+        num_skip_layers_excite = 4,
+        unconditional = True
+    ),
+    discriminator = dict(
+        dim = 64,
+        dim_max = 512,
+        image_size = 256,
+        use_glu = True,
+        num_skip_layers_excite = 4,
+        unconditional = True
+    )
+).cuda()
+
+# generator
+
+image, rgbs = gan.G(
+    batch_size = 1,
+    return_all_rgbs = True
+)
+
+# mock data
+
+real_images = torch.randn(1, 3, 256, 256).cuda()
+
+# discriminator
+
+logits, *_ = gan.D(
+    image,
+    rgbs,
+    real_images = real_images
+)
+```
+
 ## Todo
 
 - [x] make sure it can be trained unconditionally
@@ -35,8 +88,8 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
     - [x] add adaptive conv
     - [x] modify latter stage of unet to also output rgb residuals, and pass the rgb into discriminator. make discriminator agnostic to rgb being passed in
     - [x] do pixel shuffle upsamples for unet
+- [x] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
 - [ ] do a review of the auxiliary losses
-- [ ] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
 - [ ] add upsampling network architecture
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image

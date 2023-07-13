@@ -10,6 +10,7 @@ from einops.layers.torch import Rearrange
 
 from gigagan_pytorch.attend import Attend
 from gigagan_pytorch.gigagan_pytorch import (
+    BaseGenerator,
     StyleNetwork,
     AdaptiveConv2DMod,
     TextEncoder,
@@ -17,7 +18,7 @@ from gigagan_pytorch.gigagan_pytorch import (
 )
 
 from beartype import beartype
-from beartype.typing import Optional, List
+from beartype.typing import Optional, List, Union, Dict
 from collections.abc import Iterable
 
 # helpers functions
@@ -286,7 +287,7 @@ class LinearTransformer(nn.Module):
 
 # model
 
-class UnetUpsampler(nn.Module):
+class UnetUpsampler(BaseGenerator):
 
     @beartype
     def __init__(
@@ -297,8 +298,8 @@ class UnetUpsampler(nn.Module):
         input_image_size,
         init_dim = None,
         out_dim = None,
-        text_encoder: Optional[TextEncoder] = None,
-        style_network: Optional[StyleNetwork] = None,
+        text_encoder: Optional[Union[TextEncoder, Dict]] = None,
+        style_network: Optional[Union[StyleNetwork, Dict]] = None,
         dim_mults = (1, 2, 4, 8),
         channels = 3,
         resnet_block_groups = 8,
@@ -321,7 +322,14 @@ class UnetUpsampler(nn.Module):
 
         # style network
 
+        if isinstance(text_encoder, dict):
+            text_encoder = TextEncoder(**text_encoder)
+
         self.text_encoder = text_encoder
+
+        if isinstance(style_network, dict):
+            style_network = StyleNetwork(**style_network)
+
         self.style_network = style_network
 
         # validate text conditioning and style network hparams

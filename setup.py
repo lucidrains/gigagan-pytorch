@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'gigagan-pytorch',
   packages = find_packages(exclude=[]),
-  version = '0.0.31',
+  version = '0.0.32',
   license='MIT',
   description = 'GigaGAN - Pytorch',
   author = 'Phil Wang',
@@ -21,7 +21,9 @@ setup(
     'einops>=0.6',
     'ema-pytorch',
     'open-clip-torch>=2.0.0,<3.0.0',
+    'pillow',
     'torch>=1.6',
+    'torchvision'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',

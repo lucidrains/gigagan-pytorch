@@ -4,14 +4,17 @@ from random import randrange
 
 import torch
 import torch.nn.functional as F
-from torch import nn, einsum
+from torch.optim import Adam
+from torch import nn, einsum, Tensor
 from torch.autograd import grad as torch_grad
 
 from beartype import beartype
-from beartype.typing import List, Optional, Tuple
+from beartype.typing import List, Optional, Tuple, Dict, Union
 
 from einops import rearrange, pack, unpack, repeat, reduce
 from einops.layers.torch import Rearrange, Reduce
+
+from ema_pytorch import EMA
 
 from gigagan_pytorch.open_clip import OpenClipAdapter
 
@@ -84,9 +87,9 @@ def aux_matching_loss(real, fake):
 @beartype
 def aux_clip_loss(
     clip: OpenClipAdapter,
-    images: torch.Tensor,
+    images: Tensor,
     texts: Optional[List[str]] = None,
-    text_embeds: Optional[torch.Tensor] = None
+    text_embeds: Optional[Tensor] = None
 ):
     assert exists(texts) ^ exists(text_embeds)
 
@@ -202,8 +205,8 @@ class AdaptiveConv2DMod(nn.Module):
     def forward(
         self,
         fmap,
-        mod: Optional[torch.Tensor] = None,
-        kernel_mod: Optional[torch.Tensor] = None
+        mod: Optional[Tensor] = None,
+        kernel_mod: Optional[Tensor] = None
     ):
         """
         notation
@@ -593,11 +596,15 @@ class TextEncoder(nn.Module):
     @beartype
     def forward(
         self,
-        texts: List[str]
+        texts: Optional[List[str]] = None,
+        text_encodings: Optional[Tensor] = None
     ):
-        with torch.no_grad():
-            self.clip.eval()
-            _, text_encodings = self.clip.embed_texts(texts)
+        assert exists(texts) ^ exists(text_encodings)
+
+        if not exists(text_encodings):
+            with torch.no_grad():
+                self.clip.eval()
+                _, text_encodings = self.clip.embed_texts(texts)
 
         mask = (text_encodings != 0.).any(dim = -1)
 
@@ -659,7 +666,10 @@ class StyleNetwork(nn.Module):
 
 # generator
 
-class Generator(nn.Module):
+class BaseGenerator(nn.Module):
+    pass
+
+class Generator(BaseGenerator):
     @beartype
     def __init__(
         self,
@@ -669,8 +679,8 @@ class Generator(nn.Module):
         dim_max = 8192,
         capacity = 16,
         channels = 3,
-        style_network: Optional[StyleNetwork] = None,
-        text_encoder: Optional[TextEncoder] = None,
+        style_network: Optional[Union[StyleNetwork, Dict]] = None,
+        text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         dim_latent = 512,
         self_attn_resolutions: Tuple[int, ...] = (32, 16),
         self_attn_dim_head = 64,
@@ -690,7 +700,14 @@ class Generator(nn.Module):
         self.dim = dim
         self.channels = channels
 
+        if isinstance(style_network, dict):
+            style_network = StyleNetwork(**style_network)
+
         self.style_network = style_network
+
+        if isinstance(text_encoder, dict):
+            text_encoder = TextEncoder(**text_encoder)
+
         self.text_encoder = text_encoder
 
         self.unconditional = unconditional
@@ -1111,7 +1128,7 @@ class Discriminator(nn.Module):
         attn_heads = 8,
         self_attn_dot_product = False,
         ff_mult = 4,
-        text_encoder: Optional[TextEncoder] = None,
+        text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         text_dim = None,
         multiscale_input_resolutions: Tuple[int] = (64, 32, 16, 8),
         multiscale_output_resolutions: Tuple[int] = (32, 16, 8, 4),
@@ -1257,6 +1274,9 @@ class Discriminator(nn.Module):
         assert unconditional or (exists(text_dim) ^ exists(text_encoder))
 
         if not unconditional:
+            if isinstance(text_encoder, dict):
+                text_encoder = TextEncoder(**text_encoder)
+
             self.text_encoder = text_encoder
 
             self.text_dim = default(text_dim, text_encoder.dim)
@@ -1271,7 +1291,7 @@ class Discriminator(nn.Module):
     def forward(
         self,
         images,
-        rgbs: Optional[List[torch.Tensor]] = None,  # multi-resolution inputs (rgbs) from the generator
+        rgbs: Optional[List[Tensor]] = None,  # multi-resolution inputs (rgbs) from the generator
         texts: Optional[List[str]] = None,
         text_embeds = None,
         real_images = None                          # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
@@ -1389,10 +1409,36 @@ class GigaGAN(nn.Module):
     def __init__(
         self,
         *,
-        generator: Generator,
-        discriminator: Discriminator
+        generator: Union[BaseGenerator, Dict],
+        discriminator: Union[Discriminator, Dict],
+        upsampler_generator = False,
+        learning_rate = 1e-4,
+        betas = (0.9, 0.99),
+        ema_update_every = 10,
+        ema_decay = 0.995,
+        ema_update_after_step = 100
     ):
         super().__init__()
+
+        if upsampler_generator:
+            from gigagan_pytorch.unet_upsampler import UnetUpsampler
+            generator_klass = UnetUpsampler
+        else:
+            generator_klass = Generator
+
+        if isinstance(generator, dict):
+            generator = generator_klass(**generator)
+
+        if isinstance(discriminator, dict):
+            discriminator = Discriminator(**discriminator)
+
+        self.G = generator
+        self.D = discriminator
+
+        self.G_opt = Adam(self.G.parameters(), lr = learning_rate, betas = betas)
+        self.D_opt = Adam(self.D.parameters(), lr = learning_rate, betas = betas)
+
+        self.G_ema = EMA(generator, update_every = ema_update_every, update_after_step = ema_update_after_step, beta = ema_decay)
 
     def forward(self, x):
         return x
