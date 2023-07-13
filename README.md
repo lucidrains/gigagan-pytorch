@@ -76,6 +76,51 @@ gan(
 )
 ```
 
+For unconditional Unet Upsampler
+
+```python
+import torch
+from gigagan_pytorch import GigaGAN, ImageDataset
+
+gan = GigaGAN(
+    upsampler_generator = True,     # set this to True
+    generator = dict(
+        style_network = dict(
+            dim = 64,
+            depth = 4
+        ),
+        dim = 64,
+        image_size = 256,
+        input_image_size = 128,
+        unconditional = True
+    ),
+    discriminator = dict(
+        dim = 64,
+        dim_max = 512,
+        image_size = 256,
+        use_glu = True,
+        num_skip_layers_excite = 4,
+        unconditional = True
+    )
+).cuda()
+
+dataset = ImageDataset(
+    folder = '/home/phil/dl/data/flowers',
+    image_size = 256
+)
+
+dataloader = dataset.get_dataloader(batch_size = 1)
+
+# training the discriminator and generator alternating
+# for 100 steps in this example, batch size 1, gradient accumulated 8 times
+
+gan(
+    dataloader = dataloader,
+    steps = 100,
+    grad_accum_every = 8
+)
+```
+
 ## Todo
 
 - [x] make sure it can be trained unconditionally

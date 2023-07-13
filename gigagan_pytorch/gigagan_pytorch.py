@@ -10,7 +10,7 @@ from torch.autograd import grad as torch_grad
 from torch.utils.data import DataLoader
 
 from beartype import beartype
-from beartype.typing import List, Optional, Tuple, Dict, Union
+from beartype.typing import List, Optional, Tuple, Dict, Union, Iterable
 
 from einops import rearrange, pack, unpack, repeat, reduce
 from einops.layers.torch import Rearrange, Reduce
@@ -1284,12 +1284,12 @@ class Discriminator(nn.Module):
             if isinstance(text_encoder, dict):
                 text_encoder = TextEncoder(**text_encoder)
 
-            self.text_encoder = text_encoder
-
             self.text_dim = default(text_dim, text_encoder.dim)
 
             self.predictor_dims = predictor_dims
             self.text_to_conv_conditioning = nn.Linear(self.text_dim, sum(predictor_dims)) if exists(self.text_dim) else None
+
+        self.text_encoder = text_encoder
 
         self.apply(self.init_)
 
@@ -1430,6 +1430,7 @@ class GigaGAN(nn.Module):
         *,
         generator: Union[BaseGenerator, Dict],
         discriminator: Union[Discriminator, Dict],
+        text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         upsampler_generator = False,
         learning_rate = 1e-4,
         betas = (0.9, 0.99)
@@ -1451,9 +1452,19 @@ class GigaGAN(nn.Module):
             discriminator = Discriminator(**discriminator)
 
         assert isinstance(generator, generator_klass)
+        assert not exists(generator.text_encoder) and not exists(discriminator.text_encoder), 'TextEncoder should be directly passed into GigaGAN, as it is shared between Generator and Discriminator'
 
         self.G = generator
         self.D = discriminator
+
+        if exists(text_encoder):
+            if isinstance(text_encoder, dict):
+                text_encoder = TextEncoder(**text_encoder)
+
+        self.text_encoder = text_encoder
+
+        assert generator.unconditional == discriminator.unconditional
+        assert exists(text_encoder) ^ generator.unconditional, 'text encoder should not be given if unconditional or vice versa'
 
         self.G_opt = Adam(self.G.parameters(), lr = learning_rate, betas = betas)
         self.D_opt = Adam(self.D.parameters(), lr = learning_rate, betas = betas)
@@ -1477,9 +1488,10 @@ class GigaGAN(nn.Module):
     def print(self, msg):
         print(msg)
 
+    @beartype
     def train_discriminator_step(
         self,
-        dataloader,
+        dl_iter: Iterable,
         grad_accum_every = 1
     ):
         total_loss = 0.
@@ -1487,14 +1499,24 @@ class GigaGAN(nn.Module):
         self.D_opt.zero_grad()
 
         for _ in range(grad_accum_every):
-            real_images = next(dataloader).to(self.device)
+            real_images = next(dl_iter).to(self.device)
 
             batch_size = real_images.shape[0]
+
+            # for discriminator training, fit upsampler and image synthesis logic under same function
+
+            if self.upsampler_generator:
+                size = self.G.input_image_size
+                lowres_real_images = F.interpolate(real_images, (size, size))
+
+                G_kwargs = dict(x = lowres_real_images)
+            else:
+                G_kwargs = dict(batch_size = batch_size)
 
             # generator
 
             images, rgbs = self.G(
-                batch_size = batch_size,
+                **G_kwargs,
                 return_all_rgbs = True
             )
 
@@ -1526,14 +1548,56 @@ class GigaGAN(nn.Module):
         batch_size,
         grad_accum_every = 1
     ):
-
         total_loss = 0.
 
         self.G_opt.zero_grad()
 
         for _ in range(grad_accum_every):
             image, rgbs = self.G(
-                batch_size = 1,
+                batch_size = batch_size,
+                return_all_rgbs = True
+            )
+
+            logits, *_ = self.D(
+                image,
+                rgbs
+            )
+
+            loss = generator_hinge_loss(logits)
+
+            loss = loss / grad_accum_every
+            total_loss = total_loss + loss
+
+            loss.backward()
+
+        self.G_opt.step()
+        self.print(f'G: {total_loss:.4f}')
+
+        # update exponentially moving averaged generator
+
+        if self.has_ema_generator:
+            self.G_ema.update()
+
+    @beartype
+    def train_upsampler_step(
+        self,
+        dl_iter: Iterable,
+        grad_accum_every = 1
+    ):
+        total_loss = 0.
+
+        self.G_opt.zero_grad()
+
+        for _ in range(grad_accum_every):
+            real_images = next(dl_iter).to(self.device)
+
+            real_images.shape[0]
+
+            size = self.G.input_image_size
+            lowres_real_images = F.interpolate(real_images, (size, size))
+
+            image, rgbs = self.G(
+                lowres_real_images,
                 return_all_rgbs = True
             )
 
@@ -1570,7 +1634,11 @@ class GigaGAN(nn.Module):
 
         for _ in range(steps):
             self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every)
-            self.train_generator_step(batch_size = batch_size)
+
+            if self.upsampler_generator:
+                self.train_upsampler_step(dl_iter, grad_accum_every = grad_accum_every)
+            else:
+                self.train_generator_step(batch_size = batch_size, grad_accum_every = grad_accum_every)
 
             self.steps += 1
 
