@@ -825,6 +825,12 @@ class Generator(BaseGenerator):
         self.style_to_conv_modulations = nn.Linear(style_network.dim, sum(style_embed_split_dims))
         self.style_embed_split_dims = style_embed_split_dims
 
+        self.apply(self.init_)
+
+    def init_(self, m):
+        if type(m) in {nn.Conv2d, nn.Linear}:
+            nn.init.kaiming_normal_(m.weight, a = 0, mode = 'fan_in', nonlinearity = 'leaky_relu')
+
     @property
     def device(self):
         return next(self.parameters()).device
@@ -1283,6 +1289,12 @@ class Discriminator(nn.Module):
 
             self.predictor_dims = predictor_dims
             self.text_to_conv_conditioning = nn.Linear(self.text_dim, sum(predictor_dims)) if exists(self.text_dim) else None
+
+        self.apply(self.init_)
+
+    def init_(self, m):
+        if type(m) in {nn.Conv2d, nn.Linear}:
+            nn.init.kaiming_normal_(m.weight, a = 0, mode = 'fan_in', nonlinearity = 'leaky_relu')
 
     def resize_image_to(self, images, resolution):
         return F.interpolate(images, resolution, mode = self.resize_mode)
