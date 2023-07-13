@@ -7,7 +7,9 @@ from ray.air.config import ScalingConfig, RunConfig, CheckpointConfig, Checkpoin
 from ray.train.huggingface import AccelerateTrainer
 from ray.air import session
 from accelerate import Accelerator
-from gigagan_pytorch import VisionAidedDiscriminator, UnetUpsampler, Discriminator
+from gigagan_pytorch import  UnetUpsampler, Discriminator, TextEncoder, VisionAidedDiscriminator
+from gigagan_pytorch.open_clip import OpenClipAdapter
+
 import torch
 import torch.nn as nn
 from lion_pytorch import Lion
@@ -52,24 +54,30 @@ class GigaGANTextConditionedUpscaler(nn.Module):
         self.discriminator = Discriminator(use_glu=use_GLU_discrim)
 
         upsampler_dim = 128
+        text_encoder_dim = 128
+        text_encoder_depth = 4
+
+        clip_adapter = OpenClipAdapter()
+
+        text_encoder = TextEncoder(text_encoder_dim, text_encoder_depth, clip_adapter)
 
         self.upsampler = UnetUpsampler(
             dim=upsampler_dim,
             cross_attention=True,
-            l_global_size=l_global_size,
-            l_local_size=l_local_size,
+            text_encoder=text_encoder,
+            unconditional=False,
             **model_opts
         )
 
-    def loss(self, outputs):
+    def loss(self, inputs, outputs, texts):
         # Compute both discriminators for loss
-        clip_loss = self.model.vision_aided_discriminator(outputs)
-        discrim_loss = self.model.discriminator(outputs)
-        plip_loss = self.model.lpip_loss(outputs)
+        clip_loss = self.model.vision_aided_discriminator(outputs, texts)
+        discrim_loss = self.model.discriminator(inputs, outputs, texts)
+        plip_loss = self.model.lpip_loss(inputs, outputs)
 
-        plips_loss_strength = 0.4
-        clip_loss_strength = 0.4
-        discrim_loss_strength = 0.2
+        plips_loss_strength = 1
+        clip_loss_strength = 1
+        discrim_loss_strength = 1
 
         loss = plips_loss_strength * plip_loss +  \
             clip_loss * clip_loss_strength + \
@@ -77,35 +85,11 @@ class GigaGANTextConditionedUpscaler(nn.Module):
 
         return loss
 
-    def forward(self, images_in, text):
-        out = self.upsampler(images_in, text)
+    def forward_train(self, images_in, texts):
+        out = self.upsampler(images_in, texts=texts, return_all_rgbs=True)
 
         return out
 
-
-# Unused
-# class GigaGANUnconditionedUpscaler(nn.Module):
-#     def __init__(self):
-#         super(GigaGANTextConditionedUpscaler, self).__init__()
-#         self.lpips_loss = lpips.LPIPS(net='alex')
-#         self.vision_aided_discriminator = VisionAidedDiscriminator()
-#         self.discriminator = Discriminator()
-
-#         upsampler_dim = 128
-#         input_size = 64
-#         output_size = 256
-
-#         self.upsampler = UnetUpsampler(
-#             dim=upsampler_dim,
-#             image_size=output_size,
-#             input_image_size=input_size,
-#         )
-
-#     def forward(self, images_in):
-#         # Concatenate the text embeddings with the images along the channel dimension
-#         out = self.upsampler(images_in)
-
-#         return out
 
 
 # Takes crops of the images, prepares them for the upscaling task
@@ -166,8 +150,8 @@ def train_wds(url):
         # Model and optimizer
         model = GigaGANTextConditionedUpscaler()
 
-        opt_gen = Lion(model.generator.parameters(),
-                       lr=1e-4, weight_decay=1e-2)
+        # opt_gen = Lion(model.generator.parameters(), lr=1e-4, weight_decay=1e-2)
+        opt_gen = torch.optim.Adam(model.generator.parameters(), lr=1e=-4)
 
         opt_disc = torch.optim.Adam(
             model.discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
