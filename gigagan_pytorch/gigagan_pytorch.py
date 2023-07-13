@@ -1420,6 +1420,8 @@ class GigaGAN(nn.Module):
     ):
         super().__init__()
 
+        self.upsampler_generator = upsampler_generator
+
         if upsampler_generator:
             from gigagan_pytorch.unet_upsampler import UnetUpsampler
             generator_klass = UnetUpsampler
@@ -1431,6 +1433,8 @@ class GigaGAN(nn.Module):
 
         if isinstance(discriminator, dict):
             discriminator = Discriminator(**discriminator)
+
+        assert isinstance(generator, generator_klass)
 
         self.G = generator
         self.D = discriminator
