@@ -1,9 +1,11 @@
 from setuptools import setup, find_packages
 
+exec(open('gigagan_pytorch/version.py').read())
+
 setup(
   name = 'gigagan-pytorch',
   packages = find_packages(exclude=[]),
-  version = '0.0.33',
+  version = __version__,
   license='MIT',
   description = 'GigaGAN - Pytorch',
   author = 'Phil Wang',

@@ -1,3 +1,4 @@
 [tool.ruff]
 line-length = 1000
 ignore-init-module-imports = true
+exclude = ["setup.py"]

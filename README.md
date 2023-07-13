@@ -28,7 +28,11 @@ Simple unconditional GAN, for starters
 
 ```python
 import torch
-from gigagan_pytorch import GigaGAN
+
+from gigagan_pytorch import (
+    GigaGAN,
+    ImageDataset
+)
 
 gan = GigaGAN(
     generator = dict(
@@ -62,14 +66,21 @@ image, rgbs = gan.G(
 
 # mock data
 
-real_images = torch.randn(1, 3, 256, 256).cuda()
+dataset = ImageDataset(
+    folder = '/path/to/images',
+    image_size = 256
+)
+
+dataloader = dataset.get_dataloader(batch_size = 1)
+
+real_images = next(iter(dataloader))
 
 # discriminator
 
 logits, *_ = gan.D(
     image,
     rgbs,
-    real_images = real_images
+    real_images = real_images.cuda()
 )
 ```
 

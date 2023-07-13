@@ -2,7 +2,7 @@ from functools import partial
 from pathlib import Path
 
 from torch import nn
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 from PIL import Image
 from torchvision import transforms as T
@@ -43,6 +43,9 @@ class ImageDataset(Dataset):
             T.CenterCrop(image_size),
             T.ToTensor()
         ])
+
+    def get_dataloader(self, *args, **kwargs):
+        return DataLoader(self, *args, **kwargs)
 
     def __len__(self):
         return len(self.paths)
