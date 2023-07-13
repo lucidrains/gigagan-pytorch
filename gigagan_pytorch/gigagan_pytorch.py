@@ -1425,7 +1425,6 @@ class GigaGAN(nn.Module):
         *,
         generator: Union[BaseGenerator, Dict],
         discriminator: Union[Discriminator, Dict],
-        grad_accum_every = 1,
         upsampler_generator = False,
         learning_rate = 1e-4,
         betas = (0.9, 0.99),
