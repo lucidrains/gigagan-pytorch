@@ -450,7 +450,7 @@ class UnetUpsampler(BaseGenerator):
 
     def forward(
         self,
-        x,
+        lowres_image,
         styles = None,
         noise = None,
         texts: Optional[List[str]] = None,
@@ -459,6 +459,7 @@ class UnetUpsampler(BaseGenerator):
         text_mask = None,
         return_all_rgbs = False
     ):
+        x = lowres_image
         shape = x.shape
         batch_size = shape[0]
 

@@ -1508,8 +1508,7 @@ class GigaGAN(nn.Module):
             if self.upsampler_generator:
                 size = self.G.input_image_size
                 lowres_real_images = F.interpolate(real_images, (size, size))
-
-                G_kwargs = dict(x = lowres_real_images)
+                G_kwargs = dict(lowres_image = lowres_real_images)
             else:
                 G_kwargs = dict(batch_size = batch_size)
 
@@ -1545,7 +1544,8 @@ class GigaGAN(nn.Module):
 
     def train_generator_step(
         self,
-        batch_size,
+        batch_size = None,
+        dl_iter: Optional[Iterable] = None,
         grad_accum_every = 1
     ):
         total_loss = 0.
@@ -1553,51 +1553,22 @@ class GigaGAN(nn.Module):
         self.G_opt.zero_grad()
 
         for _ in range(grad_accum_every):
-            image, rgbs = self.G(
-                batch_size = batch_size,
-                return_all_rgbs = True
-            )
 
-            logits, *_ = self.D(
-                image,
-                rgbs
-            )
+            if self.upsampler_generator:
+                assert exists(dl_iter)
 
-            loss = generator_hinge_loss(logits)
+                real_images = next(dl_iter).to(self.device)
+                size = self.G.input_image_size
+                lowres_real_images = F.interpolate(real_images, (size, size))
 
-            loss = loss / grad_accum_every
-            total_loss = total_loss + loss
+                G_kwargs = dict(lowres_image = lowres_real_images)
+            else:
+                assert exists(batch_size)
 
-            loss.backward()
-
-        self.G_opt.step()
-        self.print(f'G: {total_loss:.4f}')
-
-        # update exponentially moving averaged generator
-
-        if self.has_ema_generator:
-            self.G_ema.update()
-
-    @beartype
-    def train_upsampler_step(
-        self,
-        dl_iter: Iterable,
-        grad_accum_every = 1
-    ):
-        total_loss = 0.
-
-        self.G_opt.zero_grad()
-
-        for _ in range(grad_accum_every):
-            real_images = next(dl_iter).to(self.device)
-
-            real_images.shape[0]
-
-            size = self.G.input_image_size
-            lowres_real_images = F.interpolate(real_images, (size, size))
+                G_kwargs = dict(batch_size = batch_size)
 
             image, rgbs = self.G(
-                lowres_real_images,
+                **G_kwargs,
                 return_all_rgbs = True
             )
 
@@ -1634,11 +1605,7 @@ class GigaGAN(nn.Module):
 
         for _ in range(steps):
             self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every)
-
-            if self.upsampler_generator:
-                self.train_upsampler_step(dl_iter, grad_accum_every = grad_accum_every)
-            else:
-                self.train_generator_step(batch_size = batch_size, grad_accum_every = grad_accum_every)
+            self.train_generator_step(dl_iter = dl_iter, batch_size = batch_size, grad_accum_every = grad_accum_every)
 
             self.steps += 1
 
