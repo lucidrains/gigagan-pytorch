@@ -1433,14 +1433,16 @@ class GigaGAN(nn.Module):
         generator: Union[BaseGenerator, Dict],
         discriminator: Union[Discriminator, Dict],
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
-        upsampler_generator = False,
         learning_rate = 1e-4,
         betas = (0.9, 0.99),
-        discr_aux_recon_loss_weight = 0.
+        discr_aux_recon_loss_weight = 0.,
+        upsampler_generator = False,
+        upsampler_replace_rgb_with_input_lowres_image = False
     ):
         super().__init__()
 
         self.upsampler_generator = upsampler_generator
+        self.upsampler_replace_rgb_with_input_lowres_image= upsampler_replace_rgb_with_input_lowres_image
 
         if upsampler_generator:
             from gigagan_pytorch.unet_upsampler import UnetUpsampler
@@ -1572,7 +1574,11 @@ class GigaGAN(nn.Module):
             if self.upsampler_generator:
                 size = self.G.input_image_size
                 lowres_real_images = F.interpolate(real_images, (size, size))
-                G_kwargs = dict(lowres_image = lowres_real_images)
+
+                G_kwargs = dict(
+                    lowres_image = lowres_real_images,
+                    replace_rgb_with_input_lowres_image = self.upsampler_replace_rgb_with_input_lowres_image
+                )
             else:
                 G_kwargs = dict(batch_size = batch_size)
 
@@ -1630,7 +1636,10 @@ class GigaGAN(nn.Module):
                 size = self.G.input_image_size
                 lowres_real_images = F.interpolate(real_images, (size, size))
 
-                G_kwargs = dict(lowres_image = lowres_real_images)
+                G_kwargs = dict(
+                    lowres_image = lowres_real_images,
+                    replace_rgb_with_input_lowres_image = self.upsampler_replace_rgb_with_input_lowres_image
+                )
             else:
                 assert exists(batch_size)
 
