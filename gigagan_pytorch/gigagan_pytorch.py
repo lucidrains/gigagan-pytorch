@@ -1489,6 +1489,9 @@ class GigaGAN(nn.Module):
             version = __version__
         )
 
+        if self.has_ema_generator:
+            pkg['G_ema'] = self.G_ema.state_dict()
+
         torch.save(pkg, str(path))
 
     def load(self, path, strict = False):
@@ -1502,6 +1505,9 @@ class GigaGAN(nn.Module):
 
         self.G.load_state_dict(pkg['G'], strict = strict)
         self.D.load_state_dict(pkg['D'], strict = strict)
+
+        if self.has_ema_generator:
+            self.G_ema.load_state_dict(pkg['G_ema'])
 
         if 'steps' in pkg:
             self.steps.copy_(torch.tensor([pkg['steps']]))
