@@ -1,11 +1,15 @@
 from functools import partial
 from pathlib import Path
 
+import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
 from PIL import Image
 from torchvision import transforms as T
+
+from beartype.door import is_bearable
+from beartype.typing import Tuple
 
 # helper functions
 
@@ -17,6 +21,27 @@ def convert_image_to_fn(img_type, image):
         return image
 
     return image.convert(img_type)
+
+# custom collation function
+# so dataset can return a str and it will collate into List[str]
+
+def collate_tensors_or_str(data):
+    is_one_data = not isinstance(data[0], tuple)
+
+    if is_one_data:
+        data = torch.stack(data)
+        return (data,)
+
+    outputs = []
+    for datum in zip(*data):
+        if is_bearable(datum, Tuple[str, ...]):
+            output = list(datum)
+        else:
+            output = torch.stack(datum)
+
+        outputs.append(output)
+
+    return tuple(outputs)
 
 # dataset classes
 
@@ -62,3 +87,6 @@ class ImageDataset(Dataset):
 class TextImageDataset(Dataset):
     def __init__(self):
         raise NotImplementedError
+
+    def get_dataloader(self, *args, **kwargs):
+        return DataLoader(self, *args, collate_fn = collate_tensors_or_str, **kwargs)
