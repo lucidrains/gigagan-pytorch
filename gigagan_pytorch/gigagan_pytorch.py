@@ -1146,7 +1146,8 @@ class Discriminator(nn.Module):
         num_conv_kernels = 2,
         use_glu = False,
         num_skip_layers_excite = 0,
-        unconditional = False
+        unconditional = False,
+        scale_invariant_training = True
     ):
         super().__init__()
         self.unconditional = unconditional
@@ -1217,7 +1218,7 @@ class Discriminator(nn.Module):
             # multi-scale rgb input to feature dimension
 
             from_rgb = None
-            if has_multiscale_input:
+            if has_multiscale_input and scale_invariant_training:
                 from_rgb = nn.Conv2d(channels, dim_in, 7, padding = 3)
 
             # dim in + channels for the main features
@@ -1308,7 +1309,8 @@ class Discriminator(nn.Module):
         rgbs: Optional[List[Tensor]] = None,  # multi-resolution inputs (rgbs) from the generator
         texts: Optional[List[str]] = None,
         text_embeds = None,
-        real_images = None                          # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
+        real_images = None,                   # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
+
     ):
         if not self.unconditional:
             assert exists(texts) ^ exists(text_embeds)
@@ -1589,10 +1591,11 @@ class GigaGAN(nn.Module):
 
             # generator
 
-            images, rgbs = self.G(
-                **G_kwargs,
-                return_all_rgbs = True
-            )
+            with torch.no_grad():
+                images, rgbs = self.G(
+                    **G_kwargs,
+                    return_all_rgbs = True
+                )
 
             # detach output of generator, as training discriminator only
 
@@ -1641,9 +1644,13 @@ class GigaGAN(nn.Module):
     ):
         total_discr_loss = 0.
 
+        self.D_opt.zero_grad()
         self.G_opt.zero_grad()
 
         for _ in range(grad_accum_every):
+
+            # what to pass into the generator
+            # depends on whether training upsampler or not
 
             if self.upsampler_generator:
                 assert exists(dl_iter)
@@ -1661,22 +1668,28 @@ class GigaGAN(nn.Module):
 
                 G_kwargs = dict(batch_size = batch_size)
 
+            # generator
+
             image, rgbs = self.G(
                 **G_kwargs,
                 return_all_rgbs = True
             )
+
+            # discriminator
 
             logits, *_ = self.D(
                 image,
                 rgbs
             )
 
+            # hinge loss
+
             discr_loss = generator_hinge_loss(logits)
 
             total_discr_loss = total_discr_loss + discr_loss
 
-            total_loss = discr_loss / grad_accum_every
-            total_loss.backward()
+            total_loss = discr_loss
+            (total_loss / grad_accum_every).backward()
 
         self.G_opt.step()
 
