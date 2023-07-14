@@ -1176,6 +1176,7 @@ class Discriminator(nn.Module):
 
         num_layers = int(log2(image_size) - 1)
         self.num_layers = num_layers
+        self.image_size = image_size
 
         resolutions = image_size / ((2 ** torch.arange(num_layers)))
         resolutions = resolutions.long().tolist()
@@ -1325,6 +1326,8 @@ class Discriminator(nn.Module):
             assert not any([*map(exists, (texts, text_embeds))])
 
         x = images
+
+        assert x.shape[-2:] == (self.image_size, self.image_size)
 
         # if real images are passed in, assume `images` are generated, and take care of all the multi-resolution input. this can also be done externally, in which case `real_images` will not be populated
 
