@@ -61,7 +61,6 @@ def gradient_penalty(
     output,
     weight = 10
 ):
-    images.shape[0]
     gradients, *_ = torch_grad(
         outputs = output,
         inputs = images,
@@ -72,7 +71,7 @@ def gradient_penalty(
     )
 
     gradients = rearrange(gradients, 'b ... -> b (...)')
-    return weight * ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+    return weight * ((gradients.norm(2, dim = 1) - 1) ** 2).mean()
 
 # hinge gan losses
 
@@ -1436,13 +1435,16 @@ class GigaGAN(nn.Module):
         learning_rate = 1e-4,
         betas = (0.9, 0.99),
         discr_aux_recon_loss_weight = 0.,
+        apply_gradient_penalty_every = 16,
         upsampler_generator = False,
         upsampler_replace_rgb_with_input_lowres_image = False
     ):
         super().__init__()
 
         self.upsampler_generator = upsampler_generator
+
         self.upsampler_replace_rgb_with_input_lowres_image= upsampler_replace_rgb_with_input_lowres_image
+        self.apply_gradient_penalty_every = apply_gradient_penalty_every
 
         if upsampler_generator:
             from gigagan_pytorch.unet_upsampler import UnetUpsampler
@@ -1488,7 +1490,7 @@ class GigaGAN(nn.Module):
 
         # steps
 
-        self.register_buffer('steps', torch.zeros(1, dtype = torch.long))
+        self.register_buffer('steps', torch.ones(1, dtype = torch.long))
 
     def save(self, path, overwrite = True):
         path = Path(path)
@@ -1558,14 +1560,17 @@ class GigaGAN(nn.Module):
     def train_discriminator_step(
         self,
         dl_iter: Iterable,
-        grad_accum_every = 1
+        grad_accum_every = 1,
+        apply_gradient_penalty = False
     ):
         total_discr_loss = 0.
+        total_gp_loss = 0.
 
         self.D_opt.zero_grad()
 
         for _ in range(grad_accum_every):
             real_images = next(dl_iter).to(self.device)
+            real_images.requires_grad_()
 
             batch_size = real_images.shape[0]
 
@@ -1592,6 +1597,7 @@ class GigaGAN(nn.Module):
             # detach output of generator, as training discriminator only
 
             images.detach_()
+
             for rgb in rgbs:
                 rgb.detach_()
 
@@ -1604,9 +1610,19 @@ class GigaGAN(nn.Module):
             )
 
             discr_loss = discriminator_hinge_loss(real_logits, fake_logits)
-            total_discr_loss = total_discr_loss + discr_loss
+            total_discr_loss = total_discr_loss + (discr_loss / grad_accum_every)
 
-            total_loss = discr_loss
+            # figure out gradient penalty if needed
+
+            gp_loss = 0.
+
+            if apply_gradient_penalty:
+                gp_loss = gradient_penalty(real_images, real_logits)
+                total_gp_loss = total_gp_loss + (gp_loss / grad_accum_every)
+
+            # sum up losses
+
+            total_loss = discr_loss + gp_loss
 
             if self.discr_aux_recon_loss_weight > 0.:
                 total_loss = total_loss + sum(aux_recon_losses) * self.discr_aux_recon_loss_weight
@@ -1615,7 +1631,7 @@ class GigaGAN(nn.Module):
 
         self.D_opt.step()
 
-        return total_discr_loss
+        return total_discr_loss, total_gp_loss
 
     def train_generator_step(
         self,
@@ -1682,12 +1698,19 @@ class GigaGAN(nn.Module):
         batch_size = dataloader.batch_size
         dl_iter = iter(dataloader)
 
+        last_gp_loss = 0.
+
         for _ in range(steps):
-            d_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every)
+            steps = self.steps.item()
+            apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
+
+            d_loss, gp_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every, apply_gradient_penalty = apply_gradient_penalty)
             g_loss = self.train_generator_step(dl_iter = dl_iter, batch_size = batch_size, grad_accum_every = grad_accum_every)
 
-            self.steps += 1
+            if exists(gp_loss):
+                last_gp_loss = gp_loss
 
-            self.print(f'{int(self.steps.item())} - D: {d_loss:.4f}\tG: {g_loss:.4f}')
+            self.print(f'{steps} - D: {d_loss:.4f}\tG: {g_loss:.4f}\tGP: {last_gp_loss:.4f}')
+            self.steps += 1
 
         self.print(f'complete {steps} training steps')
