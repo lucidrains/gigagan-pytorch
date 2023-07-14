@@ -58,3 +58,7 @@ class ImageDataset(Dataset):
         path = self.paths[index]
         img = Image.open(path)
         return self.transform(img)
+
+class TextImageDataset(Dataset):
+    def __init__(self):
+        raise NotImplementedError

@@ -9,7 +9,10 @@ from gigagan_pytorch.gigagan_pytorch import (
 
 from gigagan_pytorch.unet_upsampler import UnetUpsampler
 
-from gigagan_pytorch.trainers import ImageDataset
+from gigagan_pytorch.data import (
+    ImageDataset,
+    TextImageDataset
+)
 
 __all__ = [
     GigaGAN,
@@ -19,5 +22,6 @@ __all__ = [
     StyleNetwork,
     UnetUpsampler,
     TextEncoder,
-    ImageDataset
+    ImageDataset,
+    TextImageDataset
 ]
