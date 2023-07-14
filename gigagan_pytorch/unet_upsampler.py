@@ -18,8 +18,7 @@ from gigagan_pytorch.gigagan_pytorch import (
 )
 
 from beartype import beartype
-from beartype.typing import Optional, List, Union, Dict
-from collections.abc import Iterable
+from beartype.typing import Optional, List, Union, Dict, Iterable
 
 # helpers functions
 

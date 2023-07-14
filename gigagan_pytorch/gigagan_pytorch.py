@@ -1,3 +1,4 @@
+from pathlib import Path
 from math import log2, sqrt
 from functools import partial
 from random import randrange
@@ -17,6 +18,7 @@ from einops.layers.torch import Rearrange, Reduce
 
 from ema_pytorch import EMA
 
+from gigagan_pytorch.version import __version__
 from gigagan_pytorch.open_clip import OpenClipAdapter
 
 # helpers
@@ -1470,7 +1472,49 @@ class GigaGAN(nn.Module):
         self.D_opt = Adam(self.D.parameters(), lr = learning_rate, betas = betas)
 
         self.has_ema_generator = False
-        self.register_buffer('steps', torch.zeros(1,))
+        self.register_buffer('steps', torch.zeros(1, dtype = torch.long))
+
+    def save(self, path, overwrite = True):
+        path = Path(path)
+        path.parents[0].mkdir(parents = True, exist_ok =True)
+
+        assert overwrite or not path.exists()
+
+        pkg = dict(
+            G = self.G.state_dict(),
+            D = self.D.state_dict(),
+            G_opt = self.G_opt.state_dict(),
+            D_opt = self.D_opt.state_dict(),
+            steps = self.steps.item(),
+            version = __version__
+        )
+
+        torch.save(pkg, str(path))
+
+    def load(self, path, strict = False):
+        path = Path(path)
+        assert path.exists()
+
+        pkg = torch.load(str(path))
+
+        if 'version' in pkg and pkg['version'] != __version__:
+            print(f"trying to load from version {pkg['version']}")
+
+        self.G.load_state_dict(pkg['G'], strict = strict)
+        self.D.load_state_dict(pkg['D'], strict = strict)
+
+        if 'steps' in pkg:
+            self.steps.copy_(torch.tensor([pkg['steps']]))
+
+        if 'G_opt'not in pkg or 'D_opt' not in pkg:
+            return
+
+        try:
+            self.G_opt.load_state_dict(pkg['G_opt'])
+            self.D_opt.load_state_dict(pkg['D_opt'])
+        except Exception as e:
+            self.print(f'unable to load optimizers {e.msg}- optimizer states will be reset')
+            pass
 
     @property
     def device(self):
@@ -1540,7 +1584,8 @@ class GigaGAN(nn.Module):
             loss.backward()
 
         self.D_opt.step()
-        self.print(f'D: {total_loss:.4f}')
+
+        return total_loss
 
     def train_generator_step(
         self,
@@ -1585,12 +1630,13 @@ class GigaGAN(nn.Module):
             loss.backward()
 
         self.G_opt.step()
-        self.print(f'G: {total_loss:.4f}')
 
         # update exponentially moving averaged generator
 
         if self.has_ema_generator:
             self.G_ema.update()
+
+        return total_loss
 
     @beartype
     def forward(
@@ -1604,9 +1650,11 @@ class GigaGAN(nn.Module):
         dl_iter = iter(dataloader)
 
         for _ in range(steps):
-            self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every)
-            self.train_generator_step(dl_iter = dl_iter, batch_size = batch_size, grad_accum_every = grad_accum_every)
+            d_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every)
+            g_loss = self.train_generator_step(dl_iter = dl_iter, batch_size = batch_size, grad_accum_every = grad_accum_every)
 
             self.steps += 1
+
+            self.print(f'{int(self.steps.item())} - D: {d_loss:.4f}\tG: {g_loss:.4f}')
 
         self.print(f'complete {steps} training steps')
