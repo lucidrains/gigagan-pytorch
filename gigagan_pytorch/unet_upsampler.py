@@ -456,7 +456,8 @@ class UnetUpsampler(BaseGenerator):
         global_text_tokens = None,
         fine_text_tokens = None,
         text_mask = None,
-        return_all_rgbs = False
+        return_all_rgbs = False,
+        replace_rgb_with_input_lowres_image = True   # discriminator should also receive the low resolution image the upsampler sees
     ):
         x = lowres_image
         shape = x.shape
@@ -569,4 +570,17 @@ class UnetUpsampler(BaseGenerator):
 
         rgbs = list(filter(lambda t: t.shape[-1] >= shape[-1], rgbs))
 
-        return rgb, rgbs
+        if not replace_rgb_with_input_lowres_image:
+            return rgb, rgbs
+
+        # replace the rgb of the corresponding same dimension as the input low res image
+
+        output_rgbs = []
+
+        for rgb in rgbs:
+            if rgb.shape[-1] == lowres_image.shape[-1]:
+                output_rgbs.append(lowres_image)
+            else:
+                output_rgbs.append(rgb)
+
+        return rgb, output_rgbs

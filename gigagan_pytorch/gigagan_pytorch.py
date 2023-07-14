@@ -1435,7 +1435,8 @@ class GigaGAN(nn.Module):
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         upsampler_generator = False,
         learning_rate = 1e-4,
-        betas = (0.9, 0.99)
+        betas = (0.9, 0.99),
+        discr_aux_recon_loss_weight = 0.
     ):
         super().__init__()
 
@@ -1459,6 +1460,8 @@ class GigaGAN(nn.Module):
         self.G = generator
         self.D = discriminator
 
+        # text encoder
+
         if exists(text_encoder):
             if isinstance(text_encoder, dict):
                 text_encoder = TextEncoder(**text_encoder)
@@ -1468,10 +1471,21 @@ class GigaGAN(nn.Module):
         assert generator.unconditional == discriminator.unconditional
         assert exists(text_encoder) ^ generator.unconditional, 'text encoder should not be given if unconditional or vice versa'
 
+        # optimizers
+
         self.G_opt = Adam(self.G.parameters(), lr = learning_rate, betas = betas)
         self.D_opt = Adam(self.D.parameters(), lr = learning_rate, betas = betas)
 
+        # loss related
+
+        self.discr_aux_recon_loss_weight = discr_aux_recon_loss_weight
+
+        # ema
+
         self.has_ema_generator = False
+
+        # steps
+
         self.register_buffer('steps', torch.zeros(1, dtype = torch.long))
 
     def save(self, path, overwrite = True):
@@ -1544,7 +1558,7 @@ class GigaGAN(nn.Module):
         dl_iter: Iterable,
         grad_accum_every = 1
     ):
-        total_loss = 0.
+        total_discr_loss = 0.
 
         self.D_opt.zero_grad()
 
@@ -1577,21 +1591,25 @@ class GigaGAN(nn.Module):
 
             # discriminator
 
-            (fake_logits, real_logits), *_ = self.D(
+            (fake_logits, real_logits), _, aux_recon_losses = self.D(
                 images,
                 rgbs,
                 real_images = real_images
             )
 
-            loss = discriminator_hinge_loss(real_logits, fake_logits)
-            loss = loss / grad_accum_every
+            discr_loss = discriminator_hinge_loss(real_logits, fake_logits)
+            total_discr_loss = total_discr_loss + discr_loss
 
-            total_loss = total_loss + loss
-            loss.backward()
+            total_loss = discr_loss
+
+            if self.discr_aux_recon_loss_weight > 0.:
+                total_loss = total_loss + sum(aux_recon_losses) * self.discr_aux_recon_loss_weight
+
+            (total_loss / grad_accum_every).backward()
 
         self.D_opt.step()
 
-        return total_loss
+        return total_discr_loss
 
     def train_generator_step(
         self,
@@ -1599,7 +1617,7 @@ class GigaGAN(nn.Module):
         dl_iter: Optional[Iterable] = None,
         grad_accum_every = 1
     ):
-        total_loss = 0.
+        total_discr_loss = 0.
 
         self.G_opt.zero_grad()
 
@@ -1628,12 +1646,12 @@ class GigaGAN(nn.Module):
                 rgbs
             )
 
-            loss = generator_hinge_loss(logits)
+            discr_loss = generator_hinge_loss(logits)
 
-            loss = loss / grad_accum_every
-            total_loss = total_loss + loss
+            total_discr_loss = total_discr_loss + discr_loss
 
-            loss.backward()
+            total_loss = discr_loss / grad_accum_every
+            total_loss.backward()
 
         self.G_opt.step()
 
@@ -1642,7 +1660,7 @@ class GigaGAN(nn.Module):
         if self.has_ema_generator:
             self.G_ema.update()
 
-        return total_loss
+        return total_discr_loss
 
     @beartype
     def forward(

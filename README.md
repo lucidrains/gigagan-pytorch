@@ -137,11 +137,12 @@ gan(
     - [x] modify latter stage of unet to also output rgb residuals, and pass the rgb into discriminator. make discriminator agnostic to rgb being passed in
     - [x] do pixel shuffle upsamples for unet
 - [x] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
+- [x] add upsampling network architecture
+- [ ] make unconditional work for both base generator and upsampler
+- [ ] add accelerate
 - [ ] do a review of the auxiliary losses
-- [ ] add upsampling network architecture
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image
-
 
 ## Citations
 
