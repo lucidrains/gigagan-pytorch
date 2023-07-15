@@ -25,7 +25,8 @@ setup(
     'open-clip-torch>=2.0.0,<3.0.0',
     'pillow',
     'torch>=1.6',
-    'torchvision'
+    'torchvision',
+    'tqdm'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',

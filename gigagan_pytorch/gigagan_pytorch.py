@@ -21,6 +21,8 @@ from ema_pytorch import EMA
 from gigagan_pytorch.version import __version__
 from gigagan_pytorch.open_clip import OpenClipAdapter
 
+from tqdm import tqdm
+
 # helpers
 
 def exists(val):
@@ -627,13 +629,31 @@ class TextEncoder(nn.Module):
 
 # style mapping network
 
+class EqualLinear(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        lr_mul = 1,
+        bias = True
+    ):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(dim_out, dim))
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(dim_out))
+
+        self.lr_mul = lr_mul
+
+    def forward(self, input):
+        return F.linear(input, self.weight * self.lr_mul, bias=self.bias * self.lr_mul)
+
 class StyleNetwork(nn.Module):
     def __init__(
         self,
         dim,
         depth,
-        dim_text_latent = 0,
-        frac_gradient = 0.1  # in the stylegan2 paper, they control the learning rate by multiplying the parameters by a constant, but we can use another trick here from attention literature
+        lr_mul = 0.1,
+        dim_text_latent = 0
     ):
         super().__init__()
         self.dim = dim
@@ -642,29 +662,24 @@ class StyleNetwork(nn.Module):
         layers = []
         for i in range(depth):
             is_first = i == 0
+            dim_in = (dim + dim_text_latent) if is_first else dim
 
-            dim_in = dim + (dim_text_latent if is_first else 0)
-            layers.extend([nn.Linear(dim_in, dim), leaky_relu()])
+            layers.extend([EqualLinear(dim_in, dim, lr_mul), leaky_relu()])
 
         self.net = nn.Sequential(*layers)
-        self.frac_gradient = frac_gradient
-        self.dim_text_latent = dim_text_latent
 
     def forward(
         self,
         x,
         text_latent = None
     ):
-        grad_frac = self.frac_gradient
+        x = F.normalize(x, dim = 1)
 
-        if self.dim_text_latent:
+        if self.dim_text_latent > 0:
             assert exists(text_latent)
             x = torch.cat((x, text_latent), dim = -1)
 
-        x = F.normalize(x, dim = 1)
-        out = self.net(x)
-
-        return out * grad_frac + (1 - grad_frac) * out.detach()
+        return self.net(x)
 
 # generator
 
@@ -678,10 +693,11 @@ class Generator(BaseGenerator):
         *,
         dim,
         image_size,
-        dim_max = 8192,
+        dim_max = 2048,
         capacity = 16,
         channels = 3,
         style_network: Optional[Union[StyleNetwork, Dict]] = None,
+        style_network_dim = None,
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         dim_latent = 512,
         self_attn_resolutions: Tuple[int, ...] = (32, 16),
@@ -706,6 +722,13 @@ class Generator(BaseGenerator):
             style_network = StyleNetwork(**style_network)
 
         self.style_network = style_network
+
+        assert exists(style_network) ^ exists(style_network_dim), 'style_network_dim must be given to the generator if StyleNetwork not passed in as style_network'
+
+        if not exists(style_network_dim):
+            style_network_dim = style_network.dim
+
+        self.style_network_dim = style_network_dim
 
         if isinstance(text_encoder, dict):
             text_encoder = TextEncoder(**text_encoder)
@@ -824,7 +847,7 @@ class Generator(BaseGenerator):
 
         # determine the projection of the style embedding to convolutional modulation weights (+ adaptive kernel selection weights) for all layers
 
-        self.style_to_conv_modulations = nn.Linear(style_network.dim, sum(style_embed_split_dims))
+        self.style_to_conv_modulations = nn.Linear(style_network_dim, sum(style_embed_split_dims))
         self.style_embed_split_dims = style_embed_split_dims
 
         self.apply(self.init_)
@@ -866,7 +889,10 @@ class Generator(BaseGenerator):
 
         if not exists(styles):
             assert exists(self.style_network)
-            noise = default(noise, torch.randn((batch_size, self.dim), device = self.device))
+
+            if not exists(noise):
+                noise = torch.randn((batch_size, self.style_network_dim), device = self.device)
+
             styles = self.style_network(noise, global_text_tokens)
 
         # project styles to conv modulations
@@ -1129,7 +1155,7 @@ class Discriminator(nn.Module):
         dim,
         image_size,
         capacity = 16,
-        dim_max = 8192,
+        dim_max = 2048,
         channels = 3,
         attn_resolutions: Tuple[int] = (32, 16),
         attn_dim_head = 64,
@@ -1442,7 +1468,8 @@ class GigaGAN(nn.Module):
         discr_aux_recon_loss_weight = 0.,
         apply_gradient_penalty_every = 16,
         upsampler_generator = False,
-        upsampler_replace_rgb_with_input_lowres_image = False
+        upsampler_replace_rgb_with_input_lowres_image = False,
+        log_steps_every = 20
     ):
         super().__init__()
 
@@ -1494,6 +1521,8 @@ class GigaGAN(nn.Module):
         self.has_ema_generator = False
 
         # steps
+
+        self.log_steps_every = log_steps_every
 
         self.register_buffer('steps', torch.ones(1, dtype = torch.long))
 
@@ -1716,7 +1745,7 @@ class GigaGAN(nn.Module):
 
         last_gp_loss = 0.
 
-        for _ in range(steps):
+        for _ in tqdm(range(steps)):
             steps = self.steps.item()
             apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
 
@@ -1726,7 +1755,9 @@ class GigaGAN(nn.Module):
             if exists(gp_loss):
                 last_gp_loss = gp_loss
 
-            self.print(f'{steps} - D: {d_loss:.4f}\tG: {g_loss:.4f}\tGP: {last_gp_loss:.4f}')
+            if divisible_by(steps, self.log_steps_every):
+                self.print(f'{steps} - D: {d_loss:.4f}\tG: {g_loss:.4f}\tGP: {last_gp_loss:.4f}')
+
             self.steps += 1
 
         self.print(f'complete {steps} training steps')
