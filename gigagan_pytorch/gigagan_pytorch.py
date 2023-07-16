@@ -324,7 +324,11 @@ class SelfAttention(nn.Module):
         if self.dot_product:
             sim = einsum('b i d, b j d -> b i j', q, k)
         else:
-            sim = -(torch.cdist(q, k, p = 2) ** 2)
+            # using pytorch cdist leads to nans in lightweight gan training framework, at least
+            q_squared = (q * q).sum(dim = -1)
+            k_squared = (k * k).sum(dim = -1)
+            l2dist_squared = rearrange(q_squared, 'b i -> b i 1') + rearrange(k_squared, 'b j -> b 1 j') - 2 * einsum('b i d, b j d -> b i j', q, k) # hope i'm mathing right
+            sim = -l2dist_squared
 
         # scale
 
@@ -1157,17 +1161,17 @@ class Discriminator(nn.Module):
         capacity = 16,
         dim_max = 2048,
         channels = 3,
-        attn_resolutions: Tuple[int] = (32, 16),
+        attn_resolutions: Tuple[int, ...] = (32, 16),
         attn_dim_head = 64,
         attn_heads = 8,
         self_attn_dot_product = False,
         ff_mult = 4,
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         text_dim = None,
-        multiscale_input_resolutions: Tuple[int] = (64, 32, 16, 8),
-        multiscale_output_resolutions: Tuple[int] = (32, 16, 8, 4),
-        aux_recon_resolutions: Tuple[int] = (8,),
-        aux_recon_patches: Tuple[int] = (2,),
+        multiscale_input_resolutions: Tuple[int, ...] = (64, 32, 16, 8),
+        multiscale_output_resolutions: Tuple[int, ...] = (32, 16, 8, 4),
+        aux_recon_resolutions: Tuple[int, ...] = (8,),
+        aux_recon_patches: Tuple[int, ...] = (2,),
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
         use_glu = False,
@@ -1189,8 +1193,9 @@ class Discriminator(nn.Module):
         assert all([*map(is_power_of_two, multiscale_output_resolutions)])
         assert all([*map(lambda t: t >= 4, multiscale_output_resolutions)])
 
-        assert max(multiscale_input_resolutions) > max(multiscale_output_resolutions)
-        assert min(multiscale_input_resolutions) > min(multiscale_output_resolutions)
+        if len(multiscale_input_resolutions) > 0 and len(multiscale_output_resolutions) > 0:
+            assert max(multiscale_input_resolutions) > max(multiscale_output_resolutions)
+            assert min(multiscale_input_resolutions) > min(multiscale_output_resolutions)
 
         self.multiscale_output_resolutions = multiscale_output_resolutions
 
@@ -1337,6 +1342,7 @@ class Discriminator(nn.Module):
         texts: Optional[List[str]] = None,
         text_embeds = None,
         real_images = None,                   # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
+        return_aux_loss = True
 
     ):
         if not self.unconditional:
@@ -1440,7 +1446,7 @@ class Discriminator(nn.Module):
             x = x + residual
             x = x * self.residual_scale
 
-            if exists(recon_decoder):
+            if exists(recon_decoder) and return_aux_loss:
                 aux_recon_target = repeat(aux_recon_target, 'b ... -> (s b) ...', s = x.shape[0] // aux_recon_target.shape[0])
                 aux_recon_loss = recon_decoder(x, aux_recon_target)
                 aux_recon_losses.append(aux_recon_loss)
