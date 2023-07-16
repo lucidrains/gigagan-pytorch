@@ -412,19 +412,15 @@ class TextAttention(nn.Module):
         self,
         dim,
         dim_head = 64,
-        heads = 8,
-        mask_self_value = -1e2
+        heads = 8
     ):
         super().__init__()
         self.heads = heads
         self.scale = dim_head ** -0.5
         dim_inner = dim_head * heads
 
-        self.mask_self_value = mask_self_value
-
         self.norm = RMSNorm(dim)
-        self.to_qk = nn.Linear(dim, dim_inner, bias = False)
-        self.to_v = nn.Linear(dim, dim_inner, bias = False)
+        self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
 
         self.null_kv = nn.Parameter(torch.randn(2, heads, dim_head))
 
@@ -442,16 +438,14 @@ class TextAttention(nn.Module):
         i - source seq (attend from)
         j - target seq (attend to)
         """
-        batch, device = encodings.shape[0], encodings.device
+        batch = encodings.shape[0]
 
         encodings = self.norm(encodings)
 
         h = self.heads
 
-        qk, v = self.to_qk(encodings), self.to_v(encodings)
-        qk, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h = self.heads), (qk, v))
-
-        q, k = qk, qk
+        q, k, v = self.to_qkv(encodings).chunk(3, dim = -1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h = self.heads), (q, k, v))
 
         # add a null key / value, so network can choose to pay attention to nothing
 
@@ -460,17 +454,7 @@ class TextAttention(nn.Module):
         k = torch.cat((nk, k), dim = -2)
         v = torch.cat((nv, v), dim = -2)
 
-        # l2 distance
-
-        sim = -torch.cdist(q, k, p = 2) * self.scale
-
-        # following what was done in reformer for shared query / key space
-        # omit attention to self
-
-        self_mask = torch.eye(sim.shape[-2], device = device, dtype = torch.bool)
-        self_mask = F.pad(self_mask, (1, 0), value = False)
-
-        sim = sim.masked_fill(self_mask, self.mask_self_value)
+        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
 
         # key padding mask
 
