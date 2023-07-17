@@ -118,6 +118,19 @@ gan(
 )
 ```
 
+## Losses
+
+* G - Generator
+* MSG - Multiscale Generator
+* D - Discriminator
+* MSD - Multiscale Discriminator
+* GP - Gradient Penalty
+* SSL - Auxiliary Reconstruction in Discriminator (from Lightweight GAN)
+
+A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `-10` to `10`, and usually staying pretty constant. If at any time after 1k training steps these values persist at triple digits, that would mean something is wrong.
+
+`GP` and `SSL` should be pushed towards 0. GP can occasionally spike; I like to imagine it as the networks undergoing some phase shift.
+
 ## Todo
 
 - [x] make sure it can be trained unconditionally
