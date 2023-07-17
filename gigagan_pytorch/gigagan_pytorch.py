@@ -701,7 +701,6 @@ class Generator(BaseGenerator):
         cross_attn_heads = 8,
         cross_ff_mult = 4,
         num_conv_kernels = 2,  # the number of adaptive conv kernels
-        use_glu = False,
         num_skip_layers_excite = 0,
         unconditional = False
     ):
@@ -793,14 +792,11 @@ class Generator(BaseGenerator):
                 dim_skip_in, _ = dim_pairs[ind + num_skip_layers_excite]
                 skip_squeeze_excite = SqueezeExcite(dim_in, dim_skip_in)
 
-            mult = 2 if use_glu else 1
-            act_fn = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
-
             resnet_block = nn.ModuleList([
-                adaptive_conv(dim_in, dim_out * mult),
-                act_fn(),
-                adaptive_conv(dim_out, dim_out * mult),
-                act_fn()
+                adaptive_conv(dim_in, dim_out),
+                leaky_relu(),
+                adaptive_conv(dim_out, dim_out),
+                leaky_relu()
             ])
 
             to_rgb = adaptive_conv(dim_out, channels)
@@ -1161,7 +1157,6 @@ class Discriminator(nn.Module):
         aux_recon_patches: Tuple[int, ...] = (2,),
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
-        use_glu = False,
         num_skip_layers_excite = 0,
         unconditional = False,
         scale_invariant_training = True
@@ -1255,14 +1250,11 @@ class Discriminator(nn.Module):
 
             # main resnet block
 
-            mult = 2 if use_glu else 1
-            act_fn = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
-
             resnet_block = nn.Sequential(
-                conv2d_3x3(dim_in, dim_out * mult),
-                act_fn(),
-                conv2d_3x3(dim_out, dim_out * mult),
-                act_fn()
+                conv2d_3x3(dim_in, dim_out),
+                leaky_relu(),
+                conv2d_3x3(dim_out, dim_out),
+                leaky_relu()
             )
 
             # multi-scale output
@@ -1743,7 +1735,7 @@ class GigaGAN(nn.Module):
 
         last_gp_loss = 0.
 
-        for _ in tqdm(range(steps)):
+        for _ in tqdm(range(steps), initial = self.steps.item()):
             steps = self.steps.item()
             apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
 
@@ -1753,8 +1745,8 @@ class GigaGAN(nn.Module):
             if exists(gp_loss):
                 last_gp_loss = gp_loss
 
-            if divisible_by(steps, self.log_steps_every):
-                self.print(f'{steps} - D: {d_loss:.4f}\tG: {g_loss:.4f}\tGP: {last_gp_loss:.4f}')
+            if steps == 1 or divisible_by(steps, self.log_steps_every):
+                self.print(f' G: {g_loss:.3f} | D: {d_loss:.3f} | GP: {last_gp_loss:.3f}')
 
             self.steps += 1
 
