@@ -1482,6 +1482,11 @@ TrainDiscrLosses = namedtuple('TrainDiscrLosses', [
     'aux_reconstruction'
 ])
 
+TrainGenLosses = namedtuple('TrainGenLosses', [
+    'divergence',
+    'multiscale_divergence'
+])
+
 class GigaGAN(nn.Module):
     @beartype
     def __init__(
@@ -1732,7 +1737,8 @@ class GigaGAN(nn.Module):
         dl_iter: Optional[Iterable] = None,
         grad_accum_every = 1
     ):
-        total_discr_loss = 0.
+        total_divergence = 0.
+        total_multiscale_divergence = 0.
 
         self.D_opt.zero_grad()
         self.G_opt.zero_grad()
@@ -1767,18 +1773,29 @@ class GigaGAN(nn.Module):
 
             # discriminator
 
-            logits, *_ = self.D(
+            logits, multiscale_logits, _ = self.D(
                 image,
                 rgbs
             )
 
             # hinge loss
 
-            discr_loss = generator_hinge_loss(logits)
+            divergence = generator_hinge_loss(logits)
 
-            total_discr_loss = total_discr_loss + discr_loss
+            total_divergence += divergence
 
-            total_loss = discr_loss
+            total_loss = divergence
+
+            if self.multiscale_divergence_loss_weight > 0.:
+                multiscale_divergence = 0.
+
+                for multiscale_logit in multiscale_logits:
+                    multiscale_divergence = multiscale_divergence + generator_hinge_loss(multiscale_logit)
+
+                total_multiscale_divergence += multiscale_divergence
+
+                total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
+
             (total_loss / grad_accum_every).backward()
 
         self.G_opt.step()
@@ -1788,7 +1805,7 @@ class GigaGAN(nn.Module):
         if self.has_ema_generator:
             self.G_ema.update()
 
-        return total_discr_loss
+        return TrainGenLosses(total_divergence, total_multiscale_divergence)
 
     @beartype
     def forward(
@@ -1808,13 +1825,13 @@ class GigaGAN(nn.Module):
             apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
 
             d_loss, multiscale_d_loss, gp_loss, recon_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every, apply_gradient_penalty = apply_gradient_penalty)
-            g_loss = self.train_generator_step(dl_iter = dl_iter, batch_size = batch_size, grad_accum_every = grad_accum_every)
+            g_loss, multiscale_g_loss = self.train_generator_step(dl_iter = dl_iter, batch_size = batch_size, grad_accum_every = grad_accum_every)
 
             if exists(gp_loss):
                 last_gp_loss = gp_loss
 
             if steps == 1 or divisible_by(steps, self.log_steps_every):
-                self.print(f' Gen: {g_loss:.2f} | Discr: {d_loss:.2f} | MultiScale: {multiscale_d_loss:.2f} | GradPen: {last_gp_loss:.2f} | AuxRecon: {recon_loss:.2f}')
+                self.print(f' G: {g_loss:.2f} | MSG: {multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
 
             self.steps += 1
 
