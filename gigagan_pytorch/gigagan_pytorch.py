@@ -1459,7 +1459,8 @@ class GigaGAN(nn.Module):
         apply_gradient_penalty_every = 16,
         upsampler_generator = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
-        log_steps_every = 20
+        log_steps_every = 20,
+        dtype = torch.float32
     ):
         super().__init__()
 
@@ -1515,6 +1516,8 @@ class GigaGAN(nn.Module):
         self.log_steps_every = log_steps_every
 
         self.register_buffer('steps', torch.ones(1, dtype = torch.long))
+        self.to(dtype=dtype)
+        self.dtype=dtype
 
     def save(self, path, overwrite = True):
         path = Path(path)
@@ -1677,7 +1680,7 @@ class GigaGAN(nn.Module):
             if self.upsampler_generator:
                 assert exists(dl_iter)
 
-                real_images = next(dl_iter).to(self.device)
+                real_images = next(dl_iter).to(self.device, dtype=self.dtype)
                 size = self.G.input_image_size
                 lowres_real_images = F.interpolate(real_images, (size, size))
 
