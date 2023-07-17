@@ -67,6 +67,7 @@ class ImageDataset(Dataset):
 
         self.transform = T.Compose([
             T.Lambda(maybe_convert_fn),
+            T.Lambda(lambda img: img.convert('RGB')),
             T.Resize(image_size),
             T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
             T.CenterCrop(image_size),
