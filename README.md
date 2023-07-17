@@ -151,6 +151,7 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `-1
 - [x] make unconditional work for both base generator and upsampler
 
 - [ ] make recon and gradient penalty more efficient by random sampling
+- [ ] text conditioning - allow for weight tied or non-weight tied text conditioners
 - [ ] add accelerate
 - [ ] do a review of the auxiliary losses
 - [ ] port over CLI from lightweight|stylegan2-pytorch
