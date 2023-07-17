@@ -135,7 +135,9 @@ gan(
     - [x] do pixel shuffle upsamples for unet
 - [x] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
 - [x] add upsampling network architecture
-- [ ] make unconditional work for both base generator and upsampler
+- [x] make unconditional work for both base generator and upsampler
+
+- [ ] make recon and gradient penalty more efficient by random sampling
 - [ ] add accelerate
 - [ ] do a review of the auxiliary losses
 - [ ] port over CLI from lightweight|stylegan2-pytorch

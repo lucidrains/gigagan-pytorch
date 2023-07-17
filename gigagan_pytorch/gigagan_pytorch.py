@@ -69,13 +69,13 @@ def log(t, eps = 1e-20):
 
 def gradient_penalty(
     images,
-    output,
+    outputs,
     weight = 10
 ):
     gradients, *_ = torch_grad(
-        outputs = output,
+        outputs = outputs,
         inputs = images,
-        grad_outputs = torch.ones_like(output),
+        grad_outputs = [torch.ones_like(output) for output in outputs],
         create_graph = True,
         retain_graph = True,
         only_inputs = True
@@ -1266,6 +1266,7 @@ class Discriminator(nn.Module):
             # multi-scale output
 
             multiscale_output_predictor = None
+
             if has_multiscale_output:
                 multiscale_output_predictor = Predictor(dim_out, num_conv_kernels = num_conv_kernels, unconditional = unconditional)
                 predictor_dims.extend([dim_out, dim_kernel_attn])
@@ -1453,15 +1454,27 @@ class Discriminator(nn.Module):
         logits = self.to_logits(x)   
         logits = rearrange(logits, '(s b) ... -> s b ...', b = batch)
 
-        if has_real_images:
-            logits = logits.split(split_batch_size, dim = 1)
+        if not has_real_images:
+            return logits, multiscale_outputs, aux_recon_losses
 
-        return logits, multiscale_outputs, aux_recon_losses
+        # if real images are present, break up the outputs into (fake, real) tuples
+
+        split_logits = logits.split(split_batch_size, dim = 1)
+
+        split_multiscale_outputs = []
+
+        for multiscale_output in multiscale_outputs:
+            multiscale_output = rearrange(multiscale_output, '(s b) ... -> s b ...', b = batch)
+            multiscale_output = multiscale_output.split(split_batch_size, dim = 1)
+            split_multiscale_outputs.append(multiscale_output)
+
+        return split_logits, split_multiscale_outputs, aux_recon_losses
 
 # gan
 
 TrainDiscrLosses = namedtuple('TrainDiscrLosses', [
     'divergence',
+    'multiscale_divergence',
     'gradient_penalty',
     'aux_reconstruction'
 ])
@@ -1477,6 +1490,7 @@ class GigaGAN(nn.Module):
         learning_rate = 1e-4,
         betas = (0.9, 0.99),
         discr_aux_recon_loss_weight = 0.25,
+        multiscale_divergence_loss_weight = 1.,
         apply_gradient_penalty_every = 16,
         upsampler_generator = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
@@ -1526,6 +1540,7 @@ class GigaGAN(nn.Module):
         # loss related
 
         self.discr_aux_recon_loss_weight = discr_aux_recon_loss_weight
+        self.multiscale_divergence_loss_weight = multiscale_divergence_loss_weight
 
         # ema
 
@@ -1611,6 +1626,7 @@ class GigaGAN(nn.Module):
         total_divergence = 0.
         total_gp_loss = 0.
         total_aux_loss = 0.
+        total_multiscale_divergence = 0.
 
         self.D_opt.zero_grad()
 
@@ -1648,9 +1664,9 @@ class GigaGAN(nn.Module):
             for rgb in rgbs:
                 rgb.detach_()
 
-            # discriminator
+            # main divergence loss
 
-            (fake_logits, real_logits), _, aux_recon_losses = self.D(
+            (fake_logits, real_logits), multiscale_logits, aux_recon_losses = self.D(
                 images,
                 rgbs,
                 real_images = real_images
@@ -1659,29 +1675,53 @@ class GigaGAN(nn.Module):
             divergence = discriminator_hinge_loss(real_logits, fake_logits)
             total_divergence = total_divergence + (divergence / grad_accum_every)
 
+            # handle multi-scale divergence
+
+            multiscale_divergence = 0.
+
+            if self.multiscale_divergence_loss_weight > 0.:
+                multiscale_real_logits = []
+
+                for multiscale_fake, multiscale_real in multiscale_logits:
+                    multiscale_loss = discriminator_hinge_loss(multiscale_fake, multiscale_real)
+                    multiscale_divergence = multiscale_divergence + multiscale_loss
+                    multiscale_real_logits.append(multiscale_real)
+
+                total_multiscale_divergence += multiscale_divergence / grad_accum_every
+
             # figure out gradient penalty if needed
 
             gp_loss = 0.
 
             if apply_gradient_penalty:
-                gp_loss = gradient_penalty(real_images, real_logits)
-                total_gp_loss = total_gp_loss + (gp_loss / grad_accum_every)
+                gp_loss = gradient_penalty(
+                    real_images,
+                    outputs = [real_logits, *multiscale_real_logits]
+                )
+
+                total_gp_loss += gp_loss / grad_accum_every
 
             # sum up losses
 
             total_loss = divergence + gp_loss
 
+            if self.multiscale_divergence_loss_weight > 0.:
+                total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
+
             if self.discr_aux_recon_loss_weight > 0.:
                 aux_loss = sum(aux_recon_losses)
-                total_aux_loss = total_aux_loss + aux_loss / grad_accum_every
+
+                total_aux_loss += aux_loss / grad_accum_every
 
                 total_loss = total_loss + aux_loss * self.discr_aux_recon_loss_weight
+
+            # backwards
 
             (total_loss / grad_accum_every).backward()
 
         self.D_opt.step()
 
-        return TrainDiscrLosses(total_divergence, total_gp_loss, total_aux_loss)
+        return TrainDiscrLosses(total_divergence, total_multiscale_divergence, total_gp_loss, total_aux_loss)
 
     def train_generator_step(
         self,
@@ -1764,14 +1804,14 @@ class GigaGAN(nn.Module):
             steps = self.steps.item()
             apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
 
-            d_loss, gp_loss, recon_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every, apply_gradient_penalty = apply_gradient_penalty)
+            d_loss, multiscale_d_loss, gp_loss, recon_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every, apply_gradient_penalty = apply_gradient_penalty)
             g_loss = self.train_generator_step(dl_iter = dl_iter, batch_size = batch_size, grad_accum_every = grad_accum_every)
 
             if exists(gp_loss):
                 last_gp_loss = gp_loss
 
             if steps == 1 or divisible_by(steps, self.log_steps_every):
-                self.print(f' Gen: {g_loss:.3f} | Discr: {d_loss:.3f} | GradPen: {last_gp_loss:.3f} | AuxRecon: {recon_loss:.3f}')
+                self.print(f' Gen: {g_loss:.2f} | Discr: {d_loss:.2f} | MultiScale: {multiscale_d_loss:.2f} | GradPen: {last_gp_loss:.2f} | AuxRecon: {recon_loss:.2f}')
 
             self.steps += 1
 
