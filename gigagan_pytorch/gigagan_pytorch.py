@@ -1467,7 +1467,11 @@ class GigaGAN(nn.Module):
         apply_gradient_penalty_every = 16,
         upsampler_generator = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
-        log_steps_every = 20
+        log_steps_every = 20,
+        num_samples = 25,
+        save_and_sample_every = 1000,
+        results_folder = './results',
+        model_folder = './gigagan-models/model.ckpt'
     ):
         super().__init__()
 
@@ -1523,6 +1527,12 @@ class GigaGAN(nn.Module):
         self.log_steps_every = log_steps_every
 
         self.register_buffer('steps', torch.ones(1, dtype = torch.long))
+
+        self.num_samples=num_samples
+        self.save_and_sample_every = save_and_sample_every
+        self.results_folder = Path(results_folder)
+        self.results_folder.mkdir(exist_ok = True)
+        self.model_folder = model_folder
 
     def save(self, path, overwrite = True):
         path = Path(path)
@@ -1730,6 +1740,23 @@ class GigaGAN(nn.Module):
 
         return total_discr_loss
 
+    def self_save_sample(self, batch_size):
+        self.G.eval()
+        with torch.inference_mode():
+            milestone = self.steps.item() // self.save_and_sample_every
+            batches = num_to_groups(self.num_samples, batch_size)
+            assert exists(batches)
+
+            G_kwargs = dict(batch_size=batches)
+            all_images_list = list(map(lambda n: self.G(batch_size = n), batches))
+            print(all_images_list)
+        all_images = torch.cat(all_images_list, dim=0)
+
+        utils.save_image(all_images.to(dtype=torch.float32), str(self.results_folder / f'sample-{milestone}.png'),
+                         nrow=int(math.sqrt(self.num_samples)))
+        # Possible to do: Include some metric to save if improved, include some sampler dict text entries
+        self.save(self.model_folder)
+    
     @beartype
     def forward(
         self,
@@ -1755,6 +1782,9 @@ class GigaGAN(nn.Module):
 
             if divisible_by(steps, self.log_steps_every):
                 self.print(f'{steps} - D: {d_loss:.4f}\tG: {g_loss:.4f}\tGP: {last_gp_loss:.4f}')
+
+            if self.steps != 0 and divisible_by(self.steps, self.save_and_sample_every):
+                self.self_save_sample(batch_size)
 
             self.steps += 1
 
