@@ -72,6 +72,9 @@ def gradient_penalty(
     outputs,
     weight = 10
 ):
+    if not isinstance(outputs, (list, tuple)):
+        outputs = [outputs]
+
     gradients, *_ = torch_grad(
         outputs = outputs,
         inputs = images,
@@ -1696,7 +1699,7 @@ class GigaGAN(nn.Module):
             if apply_gradient_penalty:
                 gp_loss = gradient_penalty(
                     real_images,
-                    outputs = [real_logits, *multiscale_real_logits]
+                    outputs = real_logits
                 )
 
                 total_gp_loss += gp_loss / grad_accum_every
