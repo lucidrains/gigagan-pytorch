@@ -1326,7 +1326,7 @@ class Discriminator(nn.Module):
         texts: Optional[List[str]] = None,
         text_embeds = None,
         real_images = None,                   # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
-        return_aux_loss = True
+        return_all_aux_loss = False           # this would return auxiliary reconstruction loss for both fake and real
 
     ):
         if not self.unconditional:
@@ -1355,7 +1355,7 @@ class Discriminator(nn.Module):
 
         batch = x.shape[0]
 
-        aux_recon_target = x
+        aux_recon_target = real_images if has_real_images else x
 
         assert not (has_real_images and not exists(rgbs)) 
 
@@ -1430,9 +1430,18 @@ class Discriminator(nn.Module):
             x = x + residual
             x = x * self.residual_scale
 
-            if exists(recon_decoder) and return_aux_loss:
-                aux_recon_target = repeat(aux_recon_target, 'b ... -> (s b) ...', s = x.shape[0] // aux_recon_target.shape[0])
-                aux_recon_loss = recon_decoder(x, aux_recon_target)
+            if exists(recon_decoder) and (return_all_aux_loss or has_real_images):
+
+                if return_all_aux_loss:
+                    recon_output = x
+
+                elif has_real_images:
+                    recon_output = rearrange(x, '(s b) ... -> s b ...', b = batch)
+                    _, recon_output = recon_output.split(split_batch_size, dim = 1)
+                    recon_output = rearrange(recon_output, 's b ... -> (s b) ...')
+
+                aux_recon_target = repeat(aux_recon_target, 'b ... -> (s b) ...', s = recon_output.shape[0] // aux_recon_target.shape[0])
+                aux_recon_loss = recon_decoder(recon_output, aux_recon_target)
                 aux_recon_losses.append(aux_recon_loss)
 
         logits = self.to_logits(x)   
