@@ -49,6 +49,11 @@ def divisible_by(numer, denom):
 def is_unique(arr):
     return len(set(arr)) == len(arr)
 
+def cycle(dl):
+    while True:
+        for data in dl:
+            yield data
+
 # activation functions
 
 def leaky_relu(neg_slope = 0.1):
@@ -1751,7 +1756,7 @@ class GigaGAN(nn.Module):
         grad_accum_every = 1
     ):
         batch_size = dataloader.batch_size
-        dl_iter = iter(dataloader)
+        dl_iter = cycle(dataloader)
 
         last_gp_loss = 0.
 
