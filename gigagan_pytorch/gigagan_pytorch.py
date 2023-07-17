@@ -1,3 +1,4 @@
+from collections import namedtuple
 from pathlib import Path
 from math import log2, sqrt
 from functools import partial
@@ -1454,6 +1455,12 @@ class Discriminator(nn.Module):
 
 # gan
 
+TrainDiscrLosses = namedtuple('TrainDiscrLosses', [
+    'divergence',
+    'gradient_penalty',
+    'aux_reconstruction'
+])
+
 class GigaGAN(nn.Module):
     @beartype
     def __init__(
@@ -1464,7 +1471,7 @@ class GigaGAN(nn.Module):
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         learning_rate = 1e-4,
         betas = (0.9, 0.99),
-        discr_aux_recon_loss_weight = 0.,
+        discr_aux_recon_loss_weight = 0.25,
         apply_gradient_penalty_every = 16,
         upsampler_generator = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
@@ -1596,8 +1603,9 @@ class GigaGAN(nn.Module):
         grad_accum_every = 1,
         apply_gradient_penalty = False
     ):
-        total_discr_loss = 0.
+        total_divergence = 0.
         total_gp_loss = 0.
+        total_aux_loss = 0.
 
         self.D_opt.zero_grad()
 
@@ -1643,8 +1651,8 @@ class GigaGAN(nn.Module):
                 real_images = real_images
             )
 
-            discr_loss = discriminator_hinge_loss(real_logits, fake_logits)
-            total_discr_loss = total_discr_loss + (discr_loss / grad_accum_every)
+            divergence = discriminator_hinge_loss(real_logits, fake_logits)
+            total_divergence = total_divergence + (divergence / grad_accum_every)
 
             # figure out gradient penalty if needed
 
@@ -1656,16 +1664,19 @@ class GigaGAN(nn.Module):
 
             # sum up losses
 
-            total_loss = discr_loss + gp_loss
+            total_loss = divergence + gp_loss
 
             if self.discr_aux_recon_loss_weight > 0.:
-                total_loss = total_loss + sum(aux_recon_losses) * self.discr_aux_recon_loss_weight
+                aux_loss = sum(aux_recon_losses)
+                total_aux_loss = total_aux_loss + aux_loss / grad_accum_every
+
+                total_loss = total_loss + aux_loss * self.discr_aux_recon_loss_weight
 
             (total_loss / grad_accum_every).backward()
 
         self.D_opt.step()
 
-        return total_discr_loss, total_gp_loss
+        return TrainDiscrLosses(total_divergence, total_gp_loss, total_aux_loss)
 
     def train_generator_step(
         self,
@@ -1748,14 +1759,14 @@ class GigaGAN(nn.Module):
             steps = self.steps.item()
             apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
 
-            d_loss, gp_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every, apply_gradient_penalty = apply_gradient_penalty)
+            d_loss, gp_loss, recon_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every, apply_gradient_penalty = apply_gradient_penalty)
             g_loss = self.train_generator_step(dl_iter = dl_iter, batch_size = batch_size, grad_accum_every = grad_accum_every)
 
             if exists(gp_loss):
                 last_gp_loss = gp_loss
 
             if steps == 1 or divisible_by(steps, self.log_steps_every):
-                self.print(f' G: {g_loss:.3f} | D: {d_loss:.3f} | GP: {last_gp_loss:.3f}')
+                self.print(f' Gen: {g_loss:.3f} | Discr: {d_loss:.3f} | GradPen: {last_gp_loss:.3f} | AuxRecon: {recon_loss:.3f}')
 
             self.steps += 1
 
