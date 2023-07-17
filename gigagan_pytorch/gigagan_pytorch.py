@@ -700,7 +700,8 @@ class Generator(BaseGenerator):
         num_conv_kernels = 2,  # the number of adaptive conv kernels
         use_glu = False,
         num_skip_layers_excite = 0,
-        unconditional = False
+        unconditional = False,
+        dtype = torch.float32
     ):
         super().__init__()
         self.dim = dim
@@ -724,6 +725,8 @@ class Generator(BaseGenerator):
         self.text_encoder = text_encoder
 
         self.unconditional = unconditional
+
+        self.dtype=dtype
 
         assert not (unconditional and exists(text_encoder))
         assert not (unconditional and exists(style_network) and style_network.dim_text_latent > 0)
@@ -879,7 +882,7 @@ class Generator(BaseGenerator):
             assert exists(self.style_network)
 
             if not exists(noise):
-                noise = torch.randn((batch_size, self.style_network_dim), device = self.device)
+                noise = torch.randn((batch_size, self.style_network_dim), device = self.device, dtype=self.dtype)
 
             styles = self.style_network(noise, global_text_tokens)
 
@@ -1161,7 +1164,8 @@ class Discriminator(nn.Module):
         use_glu = False,
         num_skip_layers_excite = 0,
         unconditional = False,
-        scale_invariant_training = True
+        scale_invariant_training = True,
+        dtype = torch.float32
     ):
         super().__init__()
         self.unconditional = unconditional
@@ -1188,6 +1192,8 @@ class Discriminator(nn.Module):
         self.aux_recon_resolutions_to_patches = {resolution: patches for resolution, patches in zip(aux_recon_resolutions, aux_recon_patches)}
 
         self.resize_mode = resize_mode
+
+        self.dtype = dtype
 
         num_layers = int(log2(image_size) - 1)
         self.num_layers = num_layers
@@ -1316,7 +1322,7 @@ class Discriminator(nn.Module):
             nn.init.kaiming_normal_(m.weight, a = 0, mode = 'fan_in', nonlinearity = 'leaky_relu')
 
     def resize_image_to(self, images, resolution):
-        return F.interpolate(images, resolution, mode = self.resize_mode)
+        return F.interpolate(images.to(dtype=torch.float32), resolution, mode = self.resize_mode).to(dtype=self.dtype)
 
     @beartype
     def forward(
@@ -1476,10 +1482,10 @@ class GigaGAN(nn.Module):
             generator_klass = Generator
 
         if isinstance(generator, dict):
-            generator = generator_klass(**generator)
+            generator = generator_klass(**generator, dtype=dtype)
 
         if isinstance(discriminator, dict):
-            discriminator = Discriminator(**discriminator)
+            discriminator = Discriminator(**discriminator, dtype=dtype)
 
         assert isinstance(generator, generator_klass)
         assert not exists(generator.text_encoder) and not exists(discriminator.text_encoder), 'TextEncoder should be directly passed into GigaGAN, as it is shared between Generator and Discriminator'
@@ -1596,7 +1602,7 @@ class GigaGAN(nn.Module):
         self.D_opt.zero_grad()
 
         for _ in range(grad_accum_every):
-            real_images = next(dl_iter).to(self.device)
+            real_images = next(dl_iter).to(self.device, dtype=self.dtype)
             real_images.requires_grad_()
 
             batch_size = real_images.shape[0]
