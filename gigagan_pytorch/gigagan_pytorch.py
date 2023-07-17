@@ -1691,8 +1691,9 @@ class GigaGAN(nn.Module):
 
             multiscale_divergence = 0.
 
+            multiscale_real_logits = []
+
             if self.multiscale_divergence_loss_weight > 0.:
-                multiscale_real_logits = []
 
                 for multiscale_fake, multiscale_real in multiscale_logits:
                     multiscale_loss = discriminator_hinge_loss(multiscale_fake, multiscale_real)
