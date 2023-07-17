@@ -70,15 +70,19 @@ def log(t, eps = 1e-20):
 def gradient_penalty(
     images,
     outputs,
+    grad_output_weights = None,
     weight = 10
 ):
     if not isinstance(outputs, (list, tuple)):
         outputs = [outputs]
 
+    if not exists(grad_output_weights):
+        grad_output_weights = (1,) * len(outputs)
+
     gradients, *_ = torch_grad(
         outputs = outputs,
         inputs = images,
-        grad_outputs = [torch.ones_like(output) for output in outputs],
+        grad_outputs = [(torch.ones_like(output) * weight) for output, weight in zip(outputs, grad_output_weights)],
         create_graph = True,
         retain_graph = True,
         only_inputs = True
@@ -1704,7 +1708,8 @@ class GigaGAN(nn.Module):
             if apply_gradient_penalty:
                 gp_loss = gradient_penalty(
                     real_images,
-                    outputs = real_logits
+                    outputs = [real_logits, *multiscale_real_logits],
+                    grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(multiscale_real_logits)]
                 )
 
                 total_gp_loss += gp_loss / grad_accum_every
