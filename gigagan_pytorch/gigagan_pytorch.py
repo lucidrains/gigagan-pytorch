@@ -45,6 +45,9 @@ def safe_unshift(arr):
 def divisible_by(numer, denom):
     return (numer % denom) == 0
 
+def is_unique(arr):
+    return len(set(arr)) == len(arr)
+
 # activation functions
 
 def leaky_relu(neg_slope = 0.1):
@@ -1170,12 +1173,17 @@ class Discriminator(nn.Module):
         assert is_power_of_two(image_size)
         assert all([*map(is_power_of_two, attn_resolutions)])
 
+        assert is_unique(multiscale_input_resolutions)
         assert all([*map(is_power_of_two, multiscale_input_resolutions)])
         assert all([*map(lambda t: t >= 4, multiscale_input_resolutions)])
+        assert all([*map(lambda t: t < image_size, multiscale_input_resolutions)])
+
         self.multiscale_input_resolutions = multiscale_input_resolutions
 
+        assert is_unique(multiscale_output_resolutions)
         assert all([*map(is_power_of_two, multiscale_output_resolutions)])
         assert all([*map(lambda t: t >= 4, multiscale_output_resolutions)])
+        assert all([*map(lambda t: t < image_size, multiscale_output_resolutions)])
 
         if len(multiscale_input_resolutions) > 0 and len(multiscale_output_resolutions) > 0:
             assert max(multiscale_input_resolutions) > max(multiscale_output_resolutions)
