@@ -102,7 +102,7 @@ gan = GigaGAN(
 ).cuda()
 
 dataset = ImageDataset(
-    folder = '/home/phil/dl/data/flowers',
+    folder = '/path/to/your/data',
     image_size = 256
 )
 
