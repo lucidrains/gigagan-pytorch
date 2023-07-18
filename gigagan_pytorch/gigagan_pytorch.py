@@ -2,7 +2,6 @@ from collections import namedtuple
 from pathlib import Path
 from math import log2, sqrt
 from functools import partial
-from random import randrange
 
 import torch
 import torch.nn.functional as F
@@ -967,10 +966,14 @@ class SimpleDecoder(nn.Module):
         dim,
         *,
         dims: Tuple[int, ...],
-        num_patches = 1
+        patch_dim: int = 1,
+        frac_patches: float = 1.
     ):
         super().__init__()
-        self.num_patches = num_patches
+        assert 0 < frac_patches <= 1.
+
+        self.patch_dim = patch_dim
+        self.frac_patches = frac_patches
 
         dims = [dim, *dims]
 
@@ -985,21 +988,33 @@ class SimpleDecoder(nn.Module):
 
         self.net = nn.Sequential(*layers)
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def forward(
         self,
         fmap,
         orig_image
     ):
-        if self.num_patches > 1:
+        if self.frac_patches < 1.:
+            batch, patch_dim = fmap.shape[0], self.patch_dim
             fmap_size, img_size = fmap.shape[-1], orig_image.shape[-1]
 
-            assert divisible_by(fmap_size, self.num_patches)
-            assert divisible_by(img_size, self.num_patches)
+            assert divisible_by(fmap_size, patch_dim), f'feature map dimensions are {fmap_size}, but the patch dim was designated to be {patch_dim}'
+            assert divisible_by(img_size, patch_dim), f'image size is {img_size} but the patch dim was specified to be {patch_dim}'
 
-            fmap, orig_image = map(lambda t: rearrange(t, 'b c (p1 h) (p2 w) -> (p1 p2) b c h w', p1 = self.num_patches, p2 = self.num_patches), (fmap, orig_image))
+            fmap, orig_image = map(lambda t: rearrange(t, 'b c (p1 h) (p2 w) -> b (p1 p2) c h w', p1 = patch_dim, p2 = patch_dim), (fmap, orig_image))
 
-            rand_index = randrange(0, self.num_patches ** 2)
-            fmap, orig_image = map(lambda t: t[rand_index], (fmap, orig_image))
+            total_patches = patch_dim ** 2
+            num_patches_recon = max(int(self.frac_patches * total_patches), 1)
+
+            batch_arange = torch.arange(batch, device = self.device)[..., None]
+            batch_randperm = torch.randn((batch, total_patches)).sort(dim = -1).indices
+            patch_indices = batch_randperm[..., :num_patches_recon]
+
+            fmap, orig_image = map(lambda t: t[batch_arange, patch_indices], (fmap, orig_image))
+            fmap, orig_image = map(lambda t: rearrange(t, 'b p ... -> (b p) ...'), (fmap, orig_image))
 
         recon = self.net(fmap)
         return F.mse_loss(recon, orig_image)
@@ -1167,7 +1182,8 @@ class Discriminator(nn.Module):
         multiscale_input_resolutions: Tuple[int, ...] = (64, 32, 16, 8),
         multiscale_output_resolutions: Tuple[int, ...] = (32, 16, 8, 4),
         aux_recon_resolutions: Tuple[int, ...] = (8,),
-        aux_recon_patches: Tuple[int, ...] = (2,),
+        aux_recon_patch_dims: Tuple[int, ...] = (2,),
+        aux_recon_frac_patches: Tuple[float, ...] = (0.25,),
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
         num_skip_layers_excite = 0,
@@ -1200,8 +1216,9 @@ class Discriminator(nn.Module):
         self.multiscale_output_resolutions = multiscale_output_resolutions
 
         assert all([*map(is_power_of_two, aux_recon_resolutions)])
-        assert len(aux_recon_resolutions) == len(aux_recon_patches)
-        self.aux_recon_resolutions_to_patches = {resolution: patches for resolution, patches in zip(aux_recon_resolutions, aux_recon_patches)}
+        assert len(aux_recon_resolutions) == len(aux_recon_patch_dims) == len(aux_recon_frac_patches)
+
+        self.aux_recon_resolutions_to_patches = {resolution: (patch_dim, frac_patches) for resolution, patch_dim, frac_patches in zip(aux_recon_resolutions, aux_recon_patch_dims, aux_recon_frac_patches)}
 
         self.resize_mode = resize_mode
 
@@ -1281,12 +1298,13 @@ class Discriminator(nn.Module):
             aux_recon_decoder = None
 
             if has_aux_recon_decoder:
-                num_patches = self.aux_recon_resolutions_to_patches[resolution]
+                patch_dim, frac_patches = self.aux_recon_resolutions_to_patches[resolution]
 
                 aux_recon_decoder = SimpleDecoder(
                     dim_out,
                     dims = tuple(upsample_dims),
-                    num_patches = num_patches
+                    patch_dim = patch_dim,
+                    frac_patches = frac_patches
                 )
 
             self.layers.append(nn.ModuleList([
@@ -1340,8 +1358,8 @@ class Discriminator(nn.Module):
         texts: Optional[List[str]] = None,
         text_embeds = None,
         real_images = None,                   # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
-        return_all_aux_loss = False           # this would return auxiliary reconstruction loss for both fake and real
-
+        return_all_aux_loss = False,          # this would return auxiliary reconstruction loss for both fake and real
+        return_multiscale_outputs = True      # can force it not to return multi-scale logits
     ):
         if not self.unconditional:
             assert exists(texts) ^ exists(text_embeds)
@@ -1403,6 +1421,7 @@ class Discriminator(nn.Module):
                 excitations.append(skip_excite)
 
             excite = safe_unshift(excitations)
+
             if exists(excite):
                 excite = repeat(excite, 'b ... -> (s b) ...', s = x.shape[0] // excite.shape[0])
                 x = x * excite
@@ -1434,7 +1453,7 @@ class Discriminator(nn.Module):
             if exists(attn):
                 x = attn(x)
 
-            if exists(predictor):
+            if exists(predictor) and return_multiscale_outputs:
                 pred_kwargs = dict()
                 if not self.unconditional:
                     pred_kwargs = dict(mod = next(conv_mods), kernel_mod = next(conv_mods))
