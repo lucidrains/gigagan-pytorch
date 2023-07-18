@@ -1184,6 +1184,7 @@ class Discriminator(nn.Module):
         aux_recon_resolutions: Tuple[int, ...] = (8,),
         aux_recon_patch_dims: Tuple[int, ...] = (2,),
         aux_recon_frac_patches: Tuple[float, ...] = (0.25,),
+        aux_recon_frac_batch_scales: Tuple[float, ...] = (0.25,),
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
         num_skip_layers_excite = 0,
@@ -1216,9 +1217,11 @@ class Discriminator(nn.Module):
         self.multiscale_output_resolutions = multiscale_output_resolutions
 
         assert all([*map(is_power_of_two, aux_recon_resolutions)])
-        assert len(aux_recon_resolutions) == len(aux_recon_patch_dims) == len(aux_recon_frac_patches)
+        assert all([*map(lambda t: 0 < t <= 1., aux_recon_frac_batch_scales)])
+        assert len(aux_recon_resolutions) == len(aux_recon_patch_dims) == len(aux_recon_frac_patches) == len(aux_recon_frac_batch_scales)
 
         self.aux_recon_resolutions_to_patches = {resolution: (patch_dim, frac_patches) for resolution, patch_dim, frac_patches in zip(aux_recon_resolutions, aux_recon_patch_dims, aux_recon_frac_patches)}
+        self.aux_recon_frac_batch_scales = aux_recon_frac_batch_scales
 
         self.resize_mode = resize_mode
 
@@ -1350,6 +1353,10 @@ class Discriminator(nn.Module):
     def resize_image_to(self, images, resolution):
         return F.interpolate(images, resolution, mode = self.resize_mode)
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     @beartype
     def forward(
         self,
@@ -1408,6 +1415,7 @@ class Discriminator(nn.Module):
         # hold auxiliary recon losses
 
         aux_recon_losses = []
+        iter_aux_recon_frac = iter(self.aux_recon_frac_batch_scales)
 
         # excitations
 
@@ -1477,6 +1485,21 @@ class Discriminator(nn.Module):
                     recon_output = rearrange(recon_output, 's b ... -> (s b) ...')
 
                 aux_recon_target = repeat(aux_recon_target, 'b ... -> (s b) ...', s = recon_output.shape[0] // aux_recon_target.shape[0])
+
+                # only reconstruct a fraction of images across batch and scale
+                # for efficiency
+
+                batch_scale = aux_recon_target.shape[0]
+                batch_scale_frac = next(iter_aux_recon_frac)
+
+                if batch_scale_frac < 1.:
+                    num_batch_scale = max(int(batch_scale_frac * batch_scale), 1)
+                    rand_indices = torch.randn((batch_scale,), device = self.device).sort(dim = -1).indices
+                    rand_indices = rand_indices[:num_batch_scale]
+
+                    recon_output = recon_output[rand_indices]
+                    aux_recon_target = aux_recon_target[rand_indices]
+
                 aux_recon_loss = recon_decoder(recon_output, aux_recon_target)
                 aux_recon_losses.append(aux_recon_loss)
 
