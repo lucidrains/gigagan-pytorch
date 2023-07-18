@@ -242,6 +242,17 @@ class AdaptiveConv2DMod(nn.Module):
 
         b, h = fmap.shape[0], fmap.shape[-2]
 
+        # account for feature map that has been expanded by the scale in the first dimension
+        # due to multiscale inputs and outputs
+
+        if mod.shape[0] != b:
+            mod = repeat(mod, 'b ... -> (s b) ...', s = b // mod.shape[0])
+
+        if kernel_mod.shape[0] != b:
+            kernel_mod = repeat(kernel_mod, 'b ... -> (s b) ...', s = b // kernel_mod.shape[0])
+
+        # prepare weights for modulation
+
         weights = self.weights
 
         if self.adaptive:
