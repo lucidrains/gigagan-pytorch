@@ -881,7 +881,7 @@ class Generator(BaseGenerator):
                 assert exists(self.text_encoder)
                 global_text_tokens, fine_text_tokens, text_mask = self.text_encoder(texts)
             else:
-                assert all([*map(exists, (global_text_tokens, fine_text_tokens, text_mask))])
+                assert all([*map(exists, (global_text_tokens, fine_text_tokens, text_mask))]), 'raw text or text embeddings were not passed in for conditional training'
         else:
             assert not any([*map(exists, (texts, global_text_tokens, fine_text_tokens))])
 
@@ -1350,8 +1350,11 @@ class Discriminator(nn.Module):
                 assert exists(self.text_encoder)
                 text_embeds, *_ = self.text_encoder(texts)
 
+            assert exists(text_embeds), 'raw text or text embeddings were not passed into discriminator for conditional training'
+
             conv_mods = self.text_to_conv_conditioning(text_embeds).split(self.predictor_dims, dim = -1)
             conv_mods = iter(conv_mods)
+
         else:
             assert not any([*map(exists, (texts, text_embeds))])
 
@@ -1504,18 +1507,19 @@ class GigaGAN(nn.Module):
         discr_aux_recon_loss_weight = 0.25,
         multiscale_divergence_loss_weight = 1.,
         apply_gradient_penalty_every = 16,
-        upsampler_generator = False,
+        train_upsampler = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
-        log_steps_every = 20
+        log_steps_every = 20,
+        create_ema_generator_at_init = True
     ):
         super().__init__()
 
-        self.upsampler_generator = upsampler_generator
+        self.train_upsampler = train_upsampler
 
         self.upsampler_replace_rgb_with_input_lowres_image= upsampler_replace_rgb_with_input_lowres_image
         self.apply_gradient_penalty_every = apply_gradient_penalty_every
 
-        if upsampler_generator:
+        if train_upsampler:
             from gigagan_pytorch.unet_upsampler import UnetUpsampler
             generator_klass = UnetUpsampler
         else:
@@ -1528,7 +1532,6 @@ class GigaGAN(nn.Module):
             discriminator = Discriminator(**discriminator)
 
         assert isinstance(generator, generator_klass)
-        assert not exists(generator.text_encoder) and not exists(discriminator.text_encoder), 'TextEncoder should be directly passed into GigaGAN, as it is shared between Generator and Discriminator'
 
         self.G = generator
         self.D = discriminator
@@ -1542,7 +1545,8 @@ class GigaGAN(nn.Module):
         self.text_encoder = text_encoder
 
         assert generator.unconditional == discriminator.unconditional
-        assert exists(text_encoder) ^ generator.unconditional, 'text encoder should not be given if unconditional or vice versa'
+
+        self.unconditional = generator.unconditional
 
         # optimizers
 
@@ -1557,6 +1561,9 @@ class GigaGAN(nn.Module):
         # ema
 
         self.has_ema_generator = False
+
+        if create_ema_generator_at_init:
+            self.create_ema_generator()
 
         # steps
 
@@ -1622,6 +1629,8 @@ class GigaGAN(nn.Module):
         update_after_step = 100,
         decay = 0.995
     ):
+        assert not self.has_ema_generator, 'EMA generator has already been created'
+
         self.has_ema_generator = True
         self.G_ema = EMA(self.G, update_every = update_every, update_after_step = update_after_step, beta = decay)
 
@@ -1643,14 +1652,24 @@ class GigaGAN(nn.Module):
         self.D_opt.zero_grad()
 
         for _ in range(grad_accum_every):
-            real_images = next(dl_iter).to(self.device)
+
+            if self.unconditional:
+                real_images = next(dl_iter)
+            else:
+                result = next(dl_iter)
+                assert isinstance(result, tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
+                real_images, texts = result
+
+            # requires grad for real images, for gradient penalty
+
+            real_images = real_images.to(self.device)
             real_images.requires_grad_()
 
             batch_size = real_images.shape[0]
 
             # for discriminator training, fit upsampler and image synthesis logic under same function
 
-            if self.upsampler_generator:
+            if self.train_upsampler:
                 size = self.G.input_image_size
                 lowres_real_images = F.interpolate(real_images, (size, size))
 
@@ -1661,11 +1680,19 @@ class GigaGAN(nn.Module):
             else:
                 G_kwargs = dict(batch_size = batch_size)
 
+            # add texts for conditioning if needed
+
+            maybe_text_kwargs = dict()
+
+            if not self.unconditional:
+                maybe_text_kwargs['texts'] = texts
+
             # generator
 
             with torch.no_grad():
                 images, rgbs = self.G(
                     **G_kwargs,
+                    **maybe_text_kwargs,
                     return_all_rgbs = True
                 )
 
@@ -1681,7 +1708,8 @@ class GigaGAN(nn.Module):
             (fake_logits, real_logits), multiscale_logits, aux_recon_losses = self.D(
                 images,
                 rgbs,
-                real_images = real_images
+                real_images = real_images,
+                **maybe_text_kwargs,
             )
 
             divergence = discriminator_hinge_loss(real_logits, fake_logits)
@@ -1754,10 +1782,25 @@ class GigaGAN(nn.Module):
             # what to pass into the generator
             # depends on whether training upsampler or not
 
-            if self.upsampler_generator:
+            maybe_text_kwargs = dict()
+
+            if self.train_upsampler or not self.unconditional:
                 assert exists(dl_iter)
 
-                real_images = next(dl_iter).to(self.device)
+                if self.unconditional:
+                    real_images = next(dl_iter)
+                else:
+                    result = next(dl_iter)
+                    assert isinstance(result, tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
+                    real_images, texts = result
+
+                    maybe_text_kwargs['texts'] = texts
+
+                real_images = real_images.to(self.device)
+
+            # if training upsample generator, need to downsample real images
+
+            if self.train_upsampler:
                 size = self.G.input_image_size
                 lowres_real_images = F.interpolate(real_images, (size, size))
 
@@ -1774,6 +1817,7 @@ class GigaGAN(nn.Module):
 
             image, rgbs = self.G(
                 **G_kwargs,
+                **maybe_text_kwargs,
                 return_all_rgbs = True
             )
 
@@ -1781,7 +1825,8 @@ class GigaGAN(nn.Module):
 
             logits, multiscale_logits, _ = self.D(
                 image,
-                rgbs
+                rgbs,
+                **maybe_text_kwargs
             )
 
             # hinge loss
@@ -1828,6 +1873,8 @@ class GigaGAN(nn.Module):
 
         for _ in tqdm(range(steps), initial = self.steps.item()):
             steps = self.steps.item()
+            is_first_step = steps == 1
+
             apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
 
             d_loss, multiscale_d_loss, gp_loss, recon_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every, apply_gradient_penalty = apply_gradient_penalty)
@@ -1836,7 +1883,7 @@ class GigaGAN(nn.Module):
             if exists(gp_loss):
                 last_gp_loss = gp_loss
 
-            if steps == 1 or divisible_by(steps, self.log_steps_every):
+            if is_first_step or divisible_by(steps, self.log_steps_every):
                 self.print(f' G: {g_loss:.2f} | MSG: {multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
 
             self.steps += 1

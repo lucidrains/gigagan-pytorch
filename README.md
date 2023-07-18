@@ -81,7 +81,7 @@ import torch
 from gigagan_pytorch import GigaGAN, ImageDataset
 
 gan = GigaGAN(
-    upsampler_generator = True,     # set this to True
+    train_upsampler = True,     # set this to True
     generator = dict(
         style_network = dict(
             dim = 64,
@@ -118,7 +118,7 @@ gan(
 )
 ```
 
-## Losses
+## Losses (wip)
 
 * `G` - Generator
 * `MSG` - Multiscale Generator
@@ -129,7 +129,7 @@ gan(
 
 A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `-10` to `10`, and usually staying pretty constant. If at any time after 1k training steps these values persist at triple digits, that would mean something is wrong.
 
-`GP` and `SSL` should be pushed towards `0`. GP can occasionally spike; I like to imagine it as the networks undergoing some phase shift.
+`GP` and `SSL` should be pushed towards `0`. `GP` can occasionally spike; I like to imagine it as the networks undergoing some phase shift.
 
 ## Todo
 
@@ -149,9 +149,9 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `-1
 - [x] get a code review for the multi-scale inputs and outputs, as the paper was a bit vague
 - [x] add upsampling network architecture
 - [x] make unconditional work for both base generator and upsampler
+- [x] make text conditioned training work for both base and upsampler
 
 - [ ] make recon and gradient penalty more efficient by random sampling
-- [ ] text conditioning - allow for weight tied or non-weight tied text conditioners
 - [ ] add accelerate
 - [ ] do a review of the auxiliary losses
 - [ ] port over CLI from lightweight|stylegan2-pytorch

@@ -90,3 +90,24 @@ class TextImageDataset(Dataset):
 
     def get_dataloader(self, *args, **kwargs):
         return DataLoader(self, *args, collate_fn = collate_tensors_or_str, **kwargs)
+
+class MockTextImageDataset(TextImageDataset):
+    def __init__(
+        self,
+        image_size,
+        length = int(1e5),
+        channels = 3
+    ):
+        self.image_size = image_size
+        self.channels = channels
+        self.length = length
+
+    def get_dataloader(self, *args, **kwargs):
+        return DataLoader(self, *args, collate_fn = collate_tensors_or_str, **kwargs)
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, index):
+        mock_image = torch.randn(self.channels, self.image_size, self.image_size)
+        return mock_image, 'mock text'

@@ -11,7 +11,8 @@ from gigagan_pytorch.unet_upsampler import UnetUpsampler
 
 from gigagan_pytorch.data import (
     ImageDataset,
-    TextImageDataset
+    TextImageDataset,
+    MockTextImageDataset
 )
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     UnetUpsampler,
     TextEncoder,
     ImageDataset,
-    TextImageDataset
+    TextImageDataset,
+    MockTextImageDataset
 ]
