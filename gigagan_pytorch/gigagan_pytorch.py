@@ -34,6 +34,9 @@ def default(*vals):
             return val
     return None
 
+def cast_tuple(t, length = 1):
+    return t if isinstance(t, tuple) else ((t,) * length)
+
 def is_power_of_two(n):
     return log2(n).is_integer()
 
@@ -1181,6 +1184,7 @@ class Discriminator(nn.Module):
         text_dim = None,
         multiscale_input_resolutions: Tuple[int, ...] = (64, 32, 16, 8),
         multiscale_output_resolutions: Tuple[int, ...] = (32, 16, 8, 4),
+        multiscale_output_batch_scales_frac: Union[float, Tuple[float, ...]] = 1.,
         aux_recon_resolutions: Tuple[int, ...] = (8,),
         aux_recon_patch_dims: Tuple[int, ...] = (2,),
         aux_recon_frac_patches: Tuple[float, ...] = (0.25,),
@@ -1215,6 +1219,7 @@ class Discriminator(nn.Module):
             assert min(multiscale_input_resolutions) > min(multiscale_output_resolutions)
 
         self.multiscale_output_resolutions = multiscale_output_resolutions
+        self.multiscale_output_batch_scales_frac = cast_tuple(multiscale_output_batch_scales_frac, len(multiscale_output_resolutions))
 
         assert all([*map(is_power_of_two, aux_recon_resolutions)])
         assert all([*map(lambda t: 0 < t <= 1., aux_recon_frac_batch_scales)])
@@ -1411,6 +1416,7 @@ class Discriminator(nn.Module):
         # hold multiscale outputs
 
         multiscale_outputs = []
+        iter_multiscale_outputs_frac = iter(self.multiscale_output_batch_scales_frac)
 
         # hold auxiliary recon losses
 
@@ -1466,7 +1472,19 @@ class Discriminator(nn.Module):
                 if not self.unconditional:
                     pred_kwargs = dict(mod = next(conv_mods), kernel_mod = next(conv_mods))
 
-                multiscale_outputs.append(predictor(x, **pred_kwargs))
+                multiscale_outputs_frac = next(iter_multiscale_outputs_frac)
+
+                predictor_input = x
+
+                if multiscale_outputs_frac < 1.:
+                    batch_scale = predictor_input.shape[0]
+                    num_batch_scale = max(int(multiscale_outputs_frac * batch_scale), 1)
+                    rand_indices = torch.randn((batch_scale,), device = self.device).sort(dim = -1).indices
+                    rand_indices = rand_indices[:num_batch_scale]
+
+                    predictor_input = predictor_input[rand_indices]
+
+                multiscale_outputs.append(predictor(predictor_input, **pred_kwargs))
 
             if exists(downsample):
                 x = downsample(x)
