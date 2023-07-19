@@ -1998,7 +1998,10 @@ class GigaGAN(nn.Module):
         if not self.train_upsampler:
             return generator_output
 
+        output_size = generator_output.shape[-1]
         lowres_image = G_kwargs['lowres_image']
+        lowres_image = F.interpolate(lowres_image, (output_size, output_size))
+
         return torch.cat([lowres_image, generator_output])
 
     @torch.inference_mode()
