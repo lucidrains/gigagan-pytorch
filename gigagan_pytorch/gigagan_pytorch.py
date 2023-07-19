@@ -1981,29 +1981,36 @@ class GigaGAN(nn.Module):
             G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
             return self.G(**G_kwargs, **maybe_text_kwargs)
 
-    def self_save_sample(self, batch_size, dl_iter):
+    @torch.inference_mode()
+    def self_save_sample(
+        self,
+        batch_size,
+        dl_iter = None
+    ):
         self.G.eval()
-        with torch.inference_mode():
 
-            milestone = self.steps.item() // self.save_and_sample_every
-            batches = num_to_groups(self.num_samples, batch_size)
-            assert exists(batches)
+        milestone = self.steps.item() // self.save_and_sample_every
+        batches = num_to_groups(self.num_samples, batch_size)
+        assert exists(batches)
 
-            if exists(self.val_dl_iter):
-                dl_iter = self.val_dl_iter
+        dl_iter = default(self.val_dl_iter, dl_iter)
 
-            else:
-                assert exists(dl_iter)
+        assert exists(dl_iter)
 
-            nrow_mult = 2 if self.train_upsampler else 1
+        nrow_mult = 2 if self.train_upsampler else 1
 
-            all_images_list = list(map(lambda n: self.sample_lambda(dl_iter, batch_size), batches))
+        all_images_list = list(map(lambda n: self.sample_lambda(dl_iter, batch_size), batches))
+
         all_images = torch.cat(all_images_list, dim=0)
-        utils.save_image(all_images, str(self.results_folder +'/'+ f'sample-{milestone}.png'),
-                         nrow=int(sqrt(self.num_samples))*nrow_mult)
+
+        utils.save_image(
+            all_images,
+            str(self.results_folder / f'sample-{milestone}.png'),
+            nrow = int(sqrt(self.num_samples)) * nrow_mult
+        )
 
         # Possible to do: Include some metric to save if improved, include some sampler dict text entries
-        self.save(str(self.model_folder+'/'+f'model-{milestone}.ckpt'))
+        self.save(str(self.model_folder / f'model-{milestone}.ckpt'))
         
     @beartype
     def forward(
