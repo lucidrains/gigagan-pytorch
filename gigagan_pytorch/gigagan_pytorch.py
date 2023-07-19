@@ -992,13 +992,16 @@ class SimpleDecoder(nn.Module):
         *,
         dims: Tuple[int, ...],
         patch_dim: int = 1,
-        frac_patches: float = 1.
+        frac_patches: float = 1.,
+        dropout: float = 0.5
     ):
         super().__init__()
         assert 0 < frac_patches <= 1.
 
         self.patch_dim = patch_dim
         self.frac_patches = frac_patches
+
+        self.dropout = nn.Dropout(dropout)
 
         dims = [dim, *dims]
 
@@ -1022,6 +1025,8 @@ class SimpleDecoder(nn.Module):
         fmap,
         orig_image
     ):
+        fmap = self.dropout(fmap)
+
         if self.frac_patches < 1.:
             batch, patch_dim = fmap.shape[0], self.patch_dim
             fmap_size, img_size = fmap.shape[-1], orig_image.shape[-1]
@@ -1210,6 +1215,7 @@ class Discriminator(nn.Module):
         aux_recon_patch_dims: Tuple[int, ...] = (2,),
         aux_recon_frac_patches: Tuple[float, ...] = (0.25,),
         aux_recon_frac_batch_scales: Tuple[float, ...] = (0.25,),
+        aux_recon_fmap_dropout: float = 0.5,
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
         num_skip_layers_excite = 0,
@@ -1334,7 +1340,8 @@ class Discriminator(nn.Module):
                     dim_out,
                     dims = tuple(upsample_dims),
                     patch_dim = patch_dim,
-                    frac_patches = frac_patches
+                    frac_patches = frac_patches,
+                    dropout = aux_recon_fmap_dropout
                 )
 
             self.layers.append(nn.ModuleList([
@@ -1590,7 +1597,7 @@ class GigaGAN(nn.Module):
         generator: Union[BaseGenerator, Dict],
         discriminator: Union[Discriminator, Dict],
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
-        learning_rate = 1e-4,
+        learning_rate = 2e-4,
         betas = (0.9, 0.99),
         weight_decay = 0.,
         discr_aux_recon_loss_weight = 0.25,
