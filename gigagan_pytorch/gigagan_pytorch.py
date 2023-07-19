@@ -1859,7 +1859,7 @@ class GigaGAN(nn.Module):
             )
 
             divergence = discriminator_hinge_loss(real_logits, fake_logits)
-            total_divergence = total_divergence + (divergence / grad_accum_every)
+            total_divergence += (divergence.item() / grad_accum_every)
 
             # handle multi-scale divergence
 
@@ -1874,7 +1874,7 @@ class GigaGAN(nn.Module):
                     multiscale_divergence = multiscale_divergence + multiscale_loss
                     multiscale_real_logits.append(multiscale_real)
 
-                total_multiscale_divergence += multiscale_divergence / grad_accum_every
+                total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
 
             # figure out gradient penalty if needed
 
@@ -1887,7 +1887,7 @@ class GigaGAN(nn.Module):
                     grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(multiscale_real_logits)]
                 )
 
-                total_gp_loss += gp_loss / grad_accum_every
+                total_gp_loss += (gp_loss.item() / grad_accum_every)
 
             # sum up losses
 
@@ -1899,7 +1899,7 @@ class GigaGAN(nn.Module):
             if self.discr_aux_recon_loss_weight > 0.:
                 aux_loss = sum(aux_recon_losses)
 
-                total_aux_loss += aux_loss / grad_accum_every
+                total_aux_loss += (aux_loss.item() / grad_accum_every)
 
                 total_loss = total_loss + aux_loss * self.discr_aux_recon_loss_weight
 
@@ -1949,7 +1949,7 @@ class GigaGAN(nn.Module):
 
             divergence = generator_hinge_loss(logits)
 
-            total_divergence += divergence
+            total_divergence += (divergence.item() / grad_accum_every)
 
             total_loss = divergence
 
@@ -1959,7 +1959,7 @@ class GigaGAN(nn.Module):
                 for multiscale_logit in multiscale_logits:
                     multiscale_divergence = multiscale_divergence + generator_hinge_loss(multiscale_logit)
 
-                total_multiscale_divergence += multiscale_divergence
+                total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
 
                 total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
 
