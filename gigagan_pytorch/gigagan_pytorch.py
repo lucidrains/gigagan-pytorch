@@ -1177,7 +1177,9 @@ class Predictor(nn.Module):
 
         for ind in range(depth):
             self.layers.append(nn.ModuleList([
-                klass(dim, dim, 1),
+                klass(dim, dim, 3, padding = 1),
+                leaky_relu(),
+                klass(dim, dim, 3, padding = 1),
                 leaky_relu()
             ]))
 
@@ -1191,13 +1193,21 @@ class Predictor(nn.Module):
     ):
         residual = self.residual_fn(x)
 
-        for layer, activation in self.layers:
-            kwargs = dict()
-            if not self.unconditional:
-                kwargs = dict(mod = mod, kernel_mod = kernel_mod)
+        kwargs = dict()
 
-            x = layer(x, **kwargs)
+        if not self.unconditional:
+            kwargs = dict(mod = mod, kernel_mod = kernel_mod)
+
+        for conv1, activation, conv2, activation in self.layers:
+
+            inner_residual = x
+
+            x = conv1(x, **kwargs)
             x = activation(x)
+            x = conv2(x, **kwargs)
+            x = activation(x)
+
+            x = x + inner_residual
 
         x = x + residual
         return self.to_logits(x)
@@ -1221,7 +1231,6 @@ class Discriminator(nn.Module):
         filter_input_resolutions: bool = True,
         multiscale_input_resolutions: Tuple[int, ...] = (64, 32, 16, 8),
         multiscale_output_skip_stages: int = 1,
-        multiscale_output_batch_scales_frac: Union[float, Tuple[float, ...]] = 1.,
         aux_recon_resolutions: Tuple[int, ...] = (8,),
         aux_recon_patch_dims: Tuple[int, ...] = (2,),
         aux_recon_frac_patches: Tuple[float, ...] = (0.25,),
@@ -1230,7 +1239,8 @@ class Discriminator(nn.Module):
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
         num_skip_layers_excite = 0,
-        unconditional = False
+        unconditional = False,
+        predictor_depth = 2
     ):
         super().__init__()
         self.unconditional = unconditional
@@ -1260,7 +1270,6 @@ class Discriminator(nn.Module):
             assert min(multiscale_input_resolutions) > min(multiscale_output_resolutions)
 
         self.multiscale_output_resolutions = multiscale_output_resolutions
-        self.multiscale_output_batch_scales_frac = cast_tuple(multiscale_output_batch_scales_frac, len(multiscale_output_resolutions))
 
         assert all([*map(is_power_of_two, aux_recon_resolutions)])
         assert all([*map(lambda t: 0 < t <= 1., aux_recon_frac_batch_scales)])
@@ -1334,7 +1343,7 @@ class Discriminator(nn.Module):
             multiscale_output_predictor = None
 
             if has_multiscale_output:
-                multiscale_output_predictor = Predictor(dim_out, num_conv_kernels = num_conv_kernels, unconditional = unconditional)
+                multiscale_output_predictor = Predictor(dim_out, num_conv_kernels = num_conv_kernels, depth = 2, unconditional = unconditional)
                 predictor_dims.extend([dim_out, dim_kernel_attn])
 
             aux_recon_decoder = None
@@ -1462,7 +1471,6 @@ class Discriminator(nn.Module):
         # hold multiscale outputs
 
         multiscale_outputs = []
-        iter_multiscale_outputs_frac = iter(self.multiscale_output_batch_scales_frac)
 
         # hold auxiliary recon losses
 
@@ -1525,18 +1533,7 @@ class Discriminator(nn.Module):
                     pred_kwargs = dict(mod = next(conv_mods), kernel_mod = next(conv_mods))
 
                 if return_multiscale_outputs:
-                    multiscale_outputs_frac = next(iter_multiscale_outputs_frac)
-
                     predictor_input = x[:batch_prev_stage]
-
-                    if multiscale_outputs_frac < 1.:
-                        batch_scale = predictor_input.shape[0]
-                        num_batch_scale = max(int(multiscale_outputs_frac * batch_scale), 1)
-                        rand_indices = torch.randn((batch_scale,), device = self.device).sort(dim = -1).indices
-                        rand_indices = rand_indices[:num_batch_scale]
-
-                        predictor_input = predictor_input[rand_indices]
-
                     multiscale_outputs.append(predictor(predictor_input, **pred_kwargs))
 
             if exists(downsample):
@@ -1630,7 +1627,7 @@ class GigaGAN(nn.Module):
         log_steps_every = 20,
         create_ema_generator_at_init = True,
         save_and_sample_every = 1000,
-        early_save_thres_steps = 1500,
+        early_save_thres_steps = 2500,
         early_save_and_sample_every = 100,
         num_samples = 25,
         model_folder = './gigagan-models',
@@ -2104,7 +2101,7 @@ class GigaGAN(nn.Module):
             if is_first_step or divisible_by(steps, self.log_steps_every):
                 self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
 
-            if is_first_step or divisible_by(steps, self.save_and_sample_every) or (steps <= self.early_save_and_sample_every and divisible_by(steps, self.early_save_and_sample_every)):
+            if is_first_step or divisible_by(steps, self.save_and_sample_every) or (steps <= self.early_save_thres_steps and divisible_by(steps, self.early_save_and_sample_every)):
                 self.save_sample(batch_size, dl_iter)
             
             self.steps += 1
