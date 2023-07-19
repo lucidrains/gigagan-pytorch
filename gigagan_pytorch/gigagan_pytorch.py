@@ -1,10 +1,12 @@
+from collections import namedtuple
 from pathlib import Path
 from math import log2, sqrt
 from functools import partial
-from random import randrange
 
 import torch
 import torch.nn.functional as F
+import torchvision.transforms
+from torchvision import utils
 from torch.optim import Adam
 from torch import nn, einsum, Tensor
 from torch.autograd import grad as torch_grad
@@ -34,6 +36,9 @@ def default(*vals):
             return val
     return None
 
+def cast_tuple(t, length = 1):
+    return t if isinstance(t, tuple) else ((t,) * length)
+
 def is_power_of_two(n):
     return log2(n).is_integer()
 
@@ -47,6 +52,19 @@ def divisible_by(numer, denom):
 
 def is_unique(arr):
     return len(set(arr)) == len(arr)
+
+def cycle(dl):
+    while True:
+        for data in dl:
+            yield data
+
+def num_to_groups(num, divisor):
+    groups = num // divisor
+    remainder = num % divisor
+    arr = [divisor] * groups
+    if remainder > 0:
+        arr.append(remainder)
+    return arr
 
 # activation functions
 
@@ -63,13 +81,20 @@ def log(t, eps = 1e-20):
 
 def gradient_penalty(
     images,
-    output,
+    outputs,
+    grad_output_weights = None,
     weight = 10
 ):
+    if not isinstance(outputs, (list, tuple)):
+        outputs = [outputs]
+
+    if not exists(grad_output_weights):
+        grad_output_weights = (1,) * len(outputs)
+
     gradients, *_ = torch_grad(
-        outputs = output,
+        outputs = outputs,
         inputs = images,
-        grad_outputs = torch.ones_like(output),
+        grad_outputs = [(torch.ones_like(output) * weight) for output, weight in zip(outputs, grad_output_weights)],
         create_graph = True,
         retain_graph = True,
         only_inputs = True
@@ -226,6 +251,17 @@ class AdaptiveConv2DMod(nn.Module):
         """
 
         b, h = fmap.shape[0], fmap.shape[-2]
+
+        # account for feature map that has been expanded by the scale in the first dimension
+        # due to multiscale inputs and outputs
+
+        if mod.shape[0] != b:
+            mod = repeat(mod, 'b ... -> (s b) ...', s = b // mod.shape[0])
+
+        if kernel_mod.shape[0] != b:
+            kernel_mod = repeat(kernel_mod, 'b ... -> (s b) ...', s = b // kernel_mod.shape[0])
+
+        # prepare weights for modulation
 
         weights = self.weights
 
@@ -701,7 +737,6 @@ class Generator(BaseGenerator):
         cross_attn_heads = 8,
         cross_ff_mult = 4,
         num_conv_kernels = 2,  # the number of adaptive conv kernels
-        use_glu = False,
         num_skip_layers_excite = 0,
         unconditional = False
     ):
@@ -793,14 +828,11 @@ class Generator(BaseGenerator):
                 dim_skip_in, _ = dim_pairs[ind + num_skip_layers_excite]
                 skip_squeeze_excite = SqueezeExcite(dim_in, dim_skip_in)
 
-            mult = 2 if use_glu else 1
-            act_fn = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
-
             resnet_block = nn.ModuleList([
-                adaptive_conv(dim_in, dim_out * mult),
-                act_fn(),
-                adaptive_conv(dim_out, dim_out * mult),
-                act_fn()
+                adaptive_conv(dim_in, dim_out),
+                leaky_relu(),
+                adaptive_conv(dim_out, dim_out),
+                leaky_relu()
             ])
 
             to_rgb = adaptive_conv(dim_out, channels)
@@ -872,7 +904,7 @@ class Generator(BaseGenerator):
                 assert exists(self.text_encoder)
                 global_text_tokens, fine_text_tokens, text_mask = self.text_encoder(texts)
             else:
-                assert all([*map(exists, (global_text_tokens, fine_text_tokens, text_mask))])
+                assert all([*map(exists, (global_text_tokens, fine_text_tokens, text_mask))]), 'raw text or text embeddings were not passed in for conditional training'
         else:
             assert not any([*map(exists, (texts, global_text_tokens, fine_text_tokens))])
 
@@ -958,10 +990,14 @@ class SimpleDecoder(nn.Module):
         dim,
         *,
         dims: Tuple[int, ...],
-        num_patches = 1
+        patch_dim: int = 1,
+        frac_patches: float = 1.
     ):
         super().__init__()
-        self.num_patches = num_patches
+        assert 0 < frac_patches <= 1.
+
+        self.patch_dim = patch_dim
+        self.frac_patches = frac_patches
 
         dims = [dim, *dims]
 
@@ -976,21 +1012,33 @@ class SimpleDecoder(nn.Module):
 
         self.net = nn.Sequential(*layers)
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def forward(
         self,
         fmap,
         orig_image
     ):
-        if self.num_patches > 1:
+        if self.frac_patches < 1.:
+            batch, patch_dim = fmap.shape[0], self.patch_dim
             fmap_size, img_size = fmap.shape[-1], orig_image.shape[-1]
 
-            assert divisible_by(fmap_size, self.num_patches)
-            assert divisible_by(img_size, self.num_patches)
+            assert divisible_by(fmap_size, patch_dim), f'feature map dimensions are {fmap_size}, but the patch dim was designated to be {patch_dim}'
+            assert divisible_by(img_size, patch_dim), f'image size is {img_size} but the patch dim was specified to be {patch_dim}'
 
-            fmap, orig_image = map(lambda t: rearrange(t, 'b c (p1 h) (p2 w) -> (p1 p2) b c h w', p1 = self.num_patches, p2 = self.num_patches), (fmap, orig_image))
+            fmap, orig_image = map(lambda t: rearrange(t, 'b c (p1 h) (p2 w) -> b (p1 p2) c h w', p1 = patch_dim, p2 = patch_dim), (fmap, orig_image))
 
-            rand_index = randrange(0, self.num_patches ** 2)
-            fmap, orig_image = map(lambda t: t[rand_index], (fmap, orig_image))
+            total_patches = patch_dim ** 2
+            num_patches_recon = max(int(self.frac_patches * total_patches), 1)
+
+            batch_arange = torch.arange(batch, device = self.device)[..., None]
+            batch_randperm = torch.randn((batch, total_patches)).sort(dim = -1).indices
+            patch_indices = batch_randperm[..., :num_patches_recon]
+
+            fmap, orig_image = map(lambda t: t[batch_arange, patch_indices], (fmap, orig_image))
+            fmap, orig_image = map(lambda t: rearrange(t, 'b p ... -> (b p) ...'), (fmap, orig_image))
 
         recon = self.net(fmap)
         return F.mse_loss(recon, orig_image)
@@ -1157,11 +1205,13 @@ class Discriminator(nn.Module):
         text_dim = None,
         multiscale_input_resolutions: Tuple[int, ...] = (64, 32, 16, 8),
         multiscale_output_resolutions: Tuple[int, ...] = (32, 16, 8, 4),
+        multiscale_output_batch_scales_frac: Union[float, Tuple[float, ...]] = 1.,
         aux_recon_resolutions: Tuple[int, ...] = (8,),
-        aux_recon_patches: Tuple[int, ...] = (2,),
+        aux_recon_patch_dims: Tuple[int, ...] = (2,),
+        aux_recon_frac_patches: Tuple[float, ...] = (0.25,),
+        aux_recon_frac_batch_scales: Tuple[float, ...] = (0.25,),
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
-        use_glu = False,
         num_skip_layers_excite = 0,
         unconditional = False,
         scale_invariant_training = True
@@ -1190,10 +1240,14 @@ class Discriminator(nn.Module):
             assert min(multiscale_input_resolutions) > min(multiscale_output_resolutions)
 
         self.multiscale_output_resolutions = multiscale_output_resolutions
+        self.multiscale_output_batch_scales_frac = cast_tuple(multiscale_output_batch_scales_frac, len(multiscale_output_resolutions))
 
         assert all([*map(is_power_of_two, aux_recon_resolutions)])
-        assert len(aux_recon_resolutions) == len(aux_recon_patches)
-        self.aux_recon_resolutions_to_patches = {resolution: patches for resolution, patches in zip(aux_recon_resolutions, aux_recon_patches)}
+        assert all([*map(lambda t: 0 < t <= 1., aux_recon_frac_batch_scales)])
+        assert len(aux_recon_resolutions) == len(aux_recon_patch_dims) == len(aux_recon_frac_patches) == len(aux_recon_frac_batch_scales)
+
+        self.aux_recon_resolutions_to_patches = {resolution: (patch_dim, frac_patches) for resolution, patch_dim, frac_patches in zip(aux_recon_resolutions, aux_recon_patch_dims, aux_recon_frac_patches)}
+        self.aux_recon_frac_batch_scales = aux_recon_frac_batch_scales
 
         self.resize_mode = resize_mode
 
@@ -1255,19 +1309,17 @@ class Discriminator(nn.Module):
 
             # main resnet block
 
-            mult = 2 if use_glu else 1
-            act_fn = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
-
             resnet_block = nn.Sequential(
-                conv2d_3x3(dim_in, dim_out * mult),
-                act_fn(),
-                conv2d_3x3(dim_out, dim_out * mult),
-                act_fn()
+                conv2d_3x3(dim_in, dim_out),
+                leaky_relu(),
+                conv2d_3x3(dim_out, dim_out),
+                leaky_relu()
             )
 
             # multi-scale output
 
             multiscale_output_predictor = None
+
             if has_multiscale_output:
                 multiscale_output_predictor = Predictor(dim_out, num_conv_kernels = num_conv_kernels, unconditional = unconditional)
                 predictor_dims.extend([dim_out, dim_kernel_attn])
@@ -1275,12 +1327,13 @@ class Discriminator(nn.Module):
             aux_recon_decoder = None
 
             if has_aux_recon_decoder:
-                num_patches = self.aux_recon_resolutions_to_patches[resolution]
+                patch_dim, frac_patches = self.aux_recon_resolutions_to_patches[resolution]
 
                 aux_recon_decoder = SimpleDecoder(
                     dim_out,
                     dims = tuple(upsample_dims),
-                    num_patches = num_patches
+                    patch_dim = patch_dim,
+                    frac_patches = frac_patches
                 )
 
             self.layers.append(nn.ModuleList([
@@ -1326,6 +1379,10 @@ class Discriminator(nn.Module):
     def resize_image_to(self, images, resolution):
         return F.interpolate(images, resolution, mode = self.resize_mode)
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     @beartype
     def forward(
         self,
@@ -1334,8 +1391,8 @@ class Discriminator(nn.Module):
         texts: Optional[List[str]] = None,
         text_embeds = None,
         real_images = None,                   # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
-        return_aux_loss = True
-
+        return_all_aux_loss = False,          # this would return auxiliary reconstruction loss for both fake and real
+        return_multiscale_outputs = True      # can force it not to return multi-scale logits
     ):
         if not self.unconditional:
             assert exists(texts) ^ exists(text_embeds)
@@ -1344,8 +1401,11 @@ class Discriminator(nn.Module):
                 assert exists(self.text_encoder)
                 text_embeds, *_ = self.text_encoder(texts)
 
+            assert exists(text_embeds), 'raw text or text embeddings were not passed into discriminator for conditional training'
+
             conv_mods = self.text_to_conv_conditioning(text_embeds).split(self.predictor_dims, dim = -1)
             conv_mods = iter(conv_mods)
+
         else:
             assert not any([*map(exists, (texts, text_embeds))])
 
@@ -1363,7 +1423,7 @@ class Discriminator(nn.Module):
 
         batch = x.shape[0]
 
-        aux_recon_target = x
+        aux_recon_target = real_images if has_real_images else x
 
         assert not (has_real_images and not exists(rgbs)) 
 
@@ -1377,10 +1437,12 @@ class Discriminator(nn.Module):
         # hold multiscale outputs
 
         multiscale_outputs = []
+        iter_multiscale_outputs_frac = iter(self.multiscale_output_batch_scales_frac)
 
         # hold auxiliary recon losses
 
         aux_recon_losses = []
+        iter_aux_recon_frac = iter(self.aux_recon_frac_batch_scales)
 
         # excitations
 
@@ -1394,6 +1456,7 @@ class Discriminator(nn.Module):
                 excitations.append(skip_excite)
 
             excite = safe_unshift(excitations)
+
             if exists(excite):
                 excite = repeat(excite, 'b ... -> (s b) ...', s = x.shape[0] // excite.shape[0])
                 x = x * excite
@@ -1425,12 +1488,24 @@ class Discriminator(nn.Module):
             if exists(attn):
                 x = attn(x)
 
-            if exists(predictor):
+            if exists(predictor) and return_multiscale_outputs:
                 pred_kwargs = dict()
                 if not self.unconditional:
                     pred_kwargs = dict(mod = next(conv_mods), kernel_mod = next(conv_mods))
 
-                multiscale_outputs.append(predictor(x, **pred_kwargs))
+                multiscale_outputs_frac = next(iter_multiscale_outputs_frac)
+
+                predictor_input = x
+
+                if multiscale_outputs_frac < 1.:
+                    batch_scale = predictor_input.shape[0]
+                    num_batch_scale = max(int(multiscale_outputs_frac * batch_scale), 1)
+                    rand_indices = torch.randn((batch_scale,), device = self.device).sort(dim = -1).indices
+                    rand_indices = rand_indices[:num_batch_scale]
+
+                    predictor_input = predictor_input[rand_indices]
+
+                multiscale_outputs.append(predictor(predictor_input, **pred_kwargs))
 
             if exists(downsample):
                 x = downsample(x)
@@ -1438,20 +1513,67 @@ class Discriminator(nn.Module):
             x = x + residual
             x = x * self.residual_scale
 
-            if exists(recon_decoder) and return_aux_loss:
-                aux_recon_target = repeat(aux_recon_target, 'b ... -> (s b) ...', s = x.shape[0] // aux_recon_target.shape[0])
-                aux_recon_loss = recon_decoder(x, aux_recon_target)
+            if exists(recon_decoder) and (return_all_aux_loss or has_real_images):
+
+                if return_all_aux_loss:
+                    recon_output = x
+
+                elif has_real_images:
+                    recon_output = rearrange(x, '(s b) ... -> s b ...', b = batch)
+                    _, recon_output = recon_output.split(split_batch_size, dim = 1)
+                    recon_output = rearrange(recon_output, 's b ... -> (s b) ...')
+
+                aux_recon_target = repeat(aux_recon_target, 'b ... -> (s b) ...', s = recon_output.shape[0] // aux_recon_target.shape[0])
+
+                # only reconstruct a fraction of images across batch and scale
+                # for efficiency
+
+                batch_scale = aux_recon_target.shape[0]
+                batch_scale_frac = next(iter_aux_recon_frac)
+
+                if batch_scale_frac < 1.:
+                    num_batch_scale = max(int(batch_scale_frac * batch_scale), 1)
+                    rand_indices = torch.randn((batch_scale,), device = self.device).sort(dim = -1).indices
+                    rand_indices = rand_indices[:num_batch_scale]
+
+                    recon_output = recon_output[rand_indices]
+                    aux_recon_target = aux_recon_target[rand_indices]
+
+                aux_recon_loss = recon_decoder(recon_output, aux_recon_target)
                 aux_recon_losses.append(aux_recon_loss)
 
         logits = self.to_logits(x)   
         logits = rearrange(logits, '(s b) ... -> s b ...', b = batch)
 
-        if has_real_images:
-            logits = logits.split(split_batch_size, dim = 1)
+        if not has_real_images:
+            return logits, multiscale_outputs, aux_recon_losses
 
-        return logits, multiscale_outputs, aux_recon_losses
+        # if real images are present, break up the outputs into (fake, real) tuples
+
+        split_logits = logits.split(split_batch_size, dim = 1)
+
+        split_multiscale_outputs = []
+
+        for multiscale_output in multiscale_outputs:
+            multiscale_output = rearrange(multiscale_output, '(s b) ... -> s b ...', b = batch)
+            multiscale_output = multiscale_output.split(split_batch_size, dim = 1)
+            split_multiscale_outputs.append(multiscale_output)
+
+        return split_logits, split_multiscale_outputs, aux_recon_losses
 
 # gan
+
+TrainDiscrLosses = namedtuple('TrainDiscrLosses', [
+    'divergence',
+    'multiscale_divergence',
+    'gradient_penalty',
+    'aux_reconstruction'
+])
+
+TrainGenLosses = namedtuple('TrainGenLosses', [
+    'divergence',
+    'multiscale_divergence'
+])
 
 class GigaGAN(nn.Module):
     @beartype
@@ -1463,24 +1585,30 @@ class GigaGAN(nn.Module):
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         learning_rate = 1e-4,
         betas = (0.9, 0.99),
-        discr_aux_recon_loss_weight = 0.,
-        apply_gradient_penalty_every = 16,
-        upsampler_generator = False,
+        discr_aux_recon_loss_weight = 0.25,
+        multiscale_divergence_loss_weight = 1.,
+        calc_multiscale_loss_every = 2,
+        apply_gradient_penalty_every = 4,
+        train_upsampler = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
         log_steps_every = 20,
-        num_samples = 25,
+        create_ema_generator_at_init = True,
         save_and_sample_every = 1000,
+        num_samples = 25,
+        model_folder = './gigagan-models',
         results_folder = './results',
-        model_folder = './gigagan-models/model.ckpt'
+        val_upsampler_dl: torch.utils.data.DataLoader = None
     ):
         super().__init__()
 
-        self.upsampler_generator = upsampler_generator
+        self.train_upsampler = train_upsampler
 
-        self.upsampler_replace_rgb_with_input_lowres_image= upsampler_replace_rgb_with_input_lowres_image
+        self.upsampler_replace_rgb_with_input_lowres_image = upsampler_replace_rgb_with_input_lowres_image
+
         self.apply_gradient_penalty_every = apply_gradient_penalty_every
+        self.calc_multiscale_loss_every = calc_multiscale_loss_every
 
-        if upsampler_generator:
+        if train_upsampler:
             from gigagan_pytorch.unet_upsampler import UnetUpsampler
             generator_klass = UnetUpsampler
         else:
@@ -1493,7 +1621,6 @@ class GigaGAN(nn.Module):
             discriminator = Discriminator(**discriminator)
 
         assert isinstance(generator, generator_klass)
-        assert not exists(generator.text_encoder) and not exists(discriminator.text_encoder), 'TextEncoder should be directly passed into GigaGAN, as it is shared between Generator and Discriminator'
 
         self.G = generator
         self.D = discriminator
@@ -1507,7 +1634,8 @@ class GigaGAN(nn.Module):
         self.text_encoder = text_encoder
 
         assert generator.unconditional == discriminator.unconditional
-        assert exists(text_encoder) ^ generator.unconditional, 'text encoder should not be given if unconditional or vice versa'
+
+        self.unconditional = generator.unconditional
 
         # optimizers
 
@@ -1517,10 +1645,14 @@ class GigaGAN(nn.Module):
         # loss related
 
         self.discr_aux_recon_loss_weight = discr_aux_recon_loss_weight
+        self.multiscale_divergence_loss_weight = multiscale_divergence_loss_weight
 
         # ema
 
         self.has_ema_generator = False
+
+        if create_ema_generator_at_init:
+            self.create_ema_generator()
 
         # steps
 
@@ -1528,11 +1660,11 @@ class GigaGAN(nn.Module):
 
         self.register_buffer('steps', torch.ones(1, dtype = torch.long))
 
-        self.num_samples=num_samples
         self.save_and_sample_every = save_and_sample_every
-        self.results_folder = Path(results_folder)
-        self.results_folder.mkdir(exist_ok = True)
+        self.num_samples = num_samples
+        self.results_folder = results_folder
         self.model_folder = model_folder
+        self.val_dl_iter = val_upsampler_dl
 
     def save(self, path, overwrite = True):
         path = Path(path)
@@ -1592,33 +1724,89 @@ class GigaGAN(nn.Module):
         update_after_step = 100,
         decay = 0.995
     ):
+        assert not self.has_ema_generator, 'EMA generator has already been created'
+
         self.has_ema_generator = True
         self.G_ema = EMA(self.G, update_every = update_every, update_after_step = update_after_step, beta = decay)
 
     def print(self, msg):
         print(msg)
 
+    def generate_kwargs(self, dl_iter, sample = False):
+        # what to pass into the generator
+        # depends on whether training upsampler or not
+
+        maybe_text_kwargs = dict()
+        if self.train_upsampler or not self.unconditional:
+            assert exists(dl_iter)
+
+            if self.unconditional:
+                real_images = next(dl_iter)
+            else:
+                result = next(dl_iter)
+                assert isinstance(result,
+                                  tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
+                real_images, texts = result
+
+                maybe_text_kwargs['texts'] = texts
+
+            real_images = real_images.to(self.device)
+
+        # if training upsample generator, need to downsample real images
+
+        if self.train_upsampler:
+            size = self.G.input_image_size
+            lowres_real_images = F.interpolate(real_images, (size, size))
+
+            G_kwargs = dict(lowres_image=lowres_real_images,
+                replace_rgb_with_input_lowres_image=self.upsampler_replace_rgb_with_input_lowres_image)
+        else:
+            assert exists(batch_size)
+
+            G_kwargs = dict(batch_size=batch_size)
+
+        if sample:
+            resize = torchvision.transforms.Resize(size=self.G.image_size, antialias=None)
+            lowres_real_images = resize(lowres_real_images)
+            return G_kwargs, maybe_text_kwargs, lowres_real_images
+
+        return G_kwargs, maybe_text_kwargs
+
     @beartype
     def train_discriminator_step(
         self,
         dl_iter: Iterable,
         grad_accum_every = 1,
-        apply_gradient_penalty = False
+        apply_gradient_penalty = False,
+        calc_multiscale_loss = True
     ):
-        total_discr_loss = 0.
+        total_divergence = 0.
         total_gp_loss = 0.
+        total_aux_loss = 0.
+
+        total_multiscale_divergence = 0. if calc_multiscale_loss else None
 
         self.D_opt.zero_grad()
 
         for _ in range(grad_accum_every):
-            real_images = next(dl_iter).to(self.device)
+
+            if self.unconditional:
+                real_images = next(dl_iter)
+            else:
+                result = next(dl_iter)
+                assert isinstance(result, tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
+                real_images, texts = result
+
+            # requires grad for real images, for gradient penalty
+
+            real_images = real_images.to(self.device)
             real_images.requires_grad_()
 
             batch_size = real_images.shape[0]
 
             # for discriminator training, fit upsampler and image synthesis logic under same function
 
-            if self.upsampler_generator:
+            if self.train_upsampler:
                 size = self.G.input_image_size
                 lowres_real_images = F.interpolate(real_images, (size, size))
 
@@ -1629,11 +1817,19 @@ class GigaGAN(nn.Module):
             else:
                 G_kwargs = dict(batch_size = batch_size)
 
+            # add texts for conditioning if needed
+
+            maybe_text_kwargs = dict()
+
+            if not self.unconditional:
+                maybe_text_kwargs['texts'] = texts
+
             # generator
 
             with torch.no_grad():
                 images, rgbs = self.G(
                     **G_kwargs,
+                    **maybe_text_kwargs,
                     return_all_rgbs = True
                 )
 
@@ -1644,91 +1840,114 @@ class GigaGAN(nn.Module):
             for rgb in rgbs:
                 rgb.detach_()
 
-            # discriminator
+            # main divergence loss
 
-            (fake_logits, real_logits), _, aux_recon_losses = self.D(
+            (fake_logits, real_logits), multiscale_logits, aux_recon_losses = self.D(
                 images,
                 rgbs,
-                real_images = real_images
+                **maybe_text_kwargs,
+                real_images = real_images,
+                return_multiscale_outputs = calc_multiscale_loss
             )
 
-            discr_loss = discriminator_hinge_loss(real_logits, fake_logits)
-            total_discr_loss = total_discr_loss + (discr_loss / grad_accum_every)
+            divergence = discriminator_hinge_loss(real_logits, fake_logits)
+            total_divergence = total_divergence + (divergence / grad_accum_every)
+
+            # handle multi-scale divergence
+
+            multiscale_divergence = 0.
+
+            multiscale_real_logits = []
+
+            if self.multiscale_divergence_loss_weight > 0. and len(multiscale_logits) > 0:
+
+                for multiscale_fake, multiscale_real in multiscale_logits:
+                    multiscale_loss = discriminator_hinge_loss(multiscale_fake, multiscale_real)
+                    multiscale_divergence = multiscale_divergence + multiscale_loss
+                    multiscale_real_logits.append(multiscale_real)
+
+                total_multiscale_divergence += multiscale_divergence / grad_accum_every
 
             # figure out gradient penalty if needed
 
             gp_loss = 0.
 
             if apply_gradient_penalty:
-                gp_loss = gradient_penalty(real_images, real_logits)
-                total_gp_loss = total_gp_loss + (gp_loss / grad_accum_every)
+                gp_loss = gradient_penalty(
+                    real_images,
+                    outputs = [real_logits, *multiscale_real_logits],
+                    grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(multiscale_real_logits)]
+                )
+
+                total_gp_loss += gp_loss / grad_accum_every
 
             # sum up losses
 
-            total_loss = discr_loss + gp_loss
+            total_loss = divergence + gp_loss
+
+            if self.multiscale_divergence_loss_weight > 0.:
+                total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
 
             if self.discr_aux_recon_loss_weight > 0.:
-                total_loss = total_loss + sum(aux_recon_losses) * self.discr_aux_recon_loss_weight
+                aux_loss = sum(aux_recon_losses)
+
+                total_aux_loss += aux_loss / grad_accum_every
+
+                total_loss = total_loss + aux_loss * self.discr_aux_recon_loss_weight
+
+            # backwards
 
             (total_loss / grad_accum_every).backward()
 
         self.D_opt.step()
 
-        return total_discr_loss, total_gp_loss
+        return TrainDiscrLosses(total_divergence, total_multiscale_divergence, total_gp_loss, total_aux_loss)
 
     def train_generator_step(
         self,
         batch_size = None,
         dl_iter: Optional[Iterable] = None,
-        grad_accum_every = 1
+        grad_accum_every = 1,
+        calc_multiscale_loss = True
     ):
-        total_discr_loss = 0.
+        total_divergence = 0.
+        total_multiscale_divergence = 0. if calc_multiscale_loss else None
 
         self.D_opt.zero_grad()
         self.G_opt.zero_grad()
 
         for _ in range(grad_accum_every):
 
-            # what to pass into the generator
-            # depends on whether training upsampler or not
-
-            if self.upsampler_generator:
-                assert exists(dl_iter)
-
-                real_images = next(dl_iter).to(self.device)
-                size = self.G.input_image_size
-                lowres_real_images = F.interpolate(real_images, (size, size))
-
-                G_kwargs = dict(
-                    lowres_image = lowres_real_images,
-                    replace_rgb_with_input_lowres_image = self.upsampler_replace_rgb_with_input_lowres_image
-                )
-            else:
-                assert exists(batch_size)
-
-                G_kwargs = dict(batch_size = batch_size)
-
             # generator
-
-            image, rgbs = self.G(
-                **G_kwargs,
-                return_all_rgbs = True
-            )
-
+            G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter)
+            image, rgbs = self.G(**G_kwargs, **maybe_text_kwargs, return_all_rgbs=True)
             # discriminator
 
-            logits, *_ = self.D(
+            logits, multiscale_logits, _ = self.D(
                 image,
-                rgbs
+                rgbs,
+                **maybe_text_kwargs,
+                return_multiscale_outputs = calc_multiscale_loss
             )
 
             # hinge loss
 
-            discr_loss = generator_hinge_loss(logits)
+            divergence = generator_hinge_loss(logits)
 
-            total_discr_loss = total_discr_loss + discr_loss
+            total_divergence += divergence
 
-            total_loss = discr_loss
+            total_loss = divergence
+
+            if self.multiscale_divergence_loss_weight > 0. and len(multiscale_logits) > 0:
+                multiscale_divergence = 0.
+
+                for multiscale_logit in multiscale_logits:
+                    multiscale_divergence = multiscale_divergence + generator_hinge_loss(multiscale_logit)
+
+                total_multiscale_divergence += multiscale_divergence
+
+                total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
+
             (total_loss / grad_accum_every).backward()
 
         self.G_opt.step()
@@ -1738,25 +1957,38 @@ class GigaGAN(nn.Module):
         if self.has_ema_generator:
             self.G_ema.update()
 
-        return total_discr_loss
+        return TrainGenLosses(total_divergence, total_multiscale_divergence)
 
-    def self_save_sample(self, batch_size):
+    def sample_lambda(self, dl_iter):
+        if self.train_upsampler:
+            G_kwargs, maybe_text_kwargs, low_res_image = self.generate_kwargs(dl_iter, True)
+            return torch.cat([low_res_image, self.G(**G_kwargs, **maybe_text_kwargs)])
+        else:
+            G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter)
+            return self.G(**G_kwargs, **maybe_text_kwargs)
+    def self_save_sample(self, batch_size, dl_iter):
         self.G.eval()
         with torch.inference_mode():
+
             milestone = self.steps.item() // self.save_and_sample_every
             batches = num_to_groups(self.num_samples, batch_size)
             assert exists(batches)
 
-            G_kwargs = dict(batch_size=batches)
-            all_images_list = list(map(lambda n: self.G(batch_size = n), batches))
-            print(all_images_list)
-        all_images = torch.cat(all_images_list, dim=0)
+            if exists(self.val_dl_iter):
+                dl_iter = self.val_dl_iter
 
-        utils.save_image(all_images.to(dtype=torch.float32), str(self.results_folder / f'sample-{milestone}.png'),
-                         nrow=int(math.sqrt(self.num_samples)))
+            else:
+                assert exists(dl_iter)
+
+            nrow_mult = 2 if self.train_upsampler else 1
+
+            all_images_list = list(map(lambda n: self.sample_lambda(dl_iter), batches))
+        all_images = torch.cat(all_images_list, dim=0)
+        utils.save_image(all_images, str(self.results_folder +'/'+ f'sample-{milestone}.png'),
+                         nrow=int(sqrt(self.num_samples))*nrow_mult)
         # Possible to do: Include some metric to save if improved, include some sampler dict text entries
-        self.save(self.model_folder)
-    
+        self.save(str(self.model_folder+'/'+f'model-{milestone}.ckpt'))
+
     @beartype
     def forward(
         self,
@@ -1766,25 +1998,47 @@ class GigaGAN(nn.Module):
         grad_accum_every = 1
     ):
         batch_size = dataloader.batch_size
-        dl_iter = iter(dataloader)
+        dl_iter = cycle(dataloader)
 
         last_gp_loss = 0.
+        last_multiscale_d_loss = 0.
+        last_multiscale_g_loss = 0.
 
-        for _ in tqdm(range(steps)):
+        for _ in tqdm(range(steps), initial = self.steps.item()):
             steps = self.steps.item()
-            apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
+            is_first_step = steps == 1
 
-            d_loss, gp_loss = self.train_discriminator_step(dl_iter, grad_accum_every = grad_accum_every, apply_gradient_penalty = apply_gradient_penalty)
-            g_loss = self.train_generator_step(dl_iter = dl_iter, batch_size = batch_size, grad_accum_every = grad_accum_every)
+            apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
+            calc_multiscale_loss =  self.calc_multiscale_loss_every > 0 and divisible_by(steps, self.calc_multiscale_loss_every)
+
+            d_loss, multiscale_d_loss, gp_loss, recon_loss = self.train_discriminator_step(
+                dl_iter,
+                grad_accum_every = grad_accum_every,
+                apply_gradient_penalty = apply_gradient_penalty,
+                calc_multiscale_loss = calc_multiscale_loss
+            )
+
+            g_loss, multiscale_g_loss = self.train_generator_step(
+                dl_iter = dl_iter,
+                batch_size = batch_size,
+                grad_accum_every = grad_accum_every,
+                calc_multiscale_loss = calc_multiscale_loss
+            )
 
             if exists(gp_loss):
                 last_gp_loss = gp_loss
 
-            if divisible_by(steps, self.log_steps_every):
-                self.print(f'{steps} - D: {d_loss:.4f}\tG: {g_loss:.4f}\tGP: {last_gp_loss:.4f}')
+            if exists(multiscale_d_loss):
+                last_multiscale_d_loss = multiscale_d_loss
 
-            if self.steps != 0 and divisible_by(self.steps, self.save_and_sample_every):
-                self.self_save_sample(batch_size)
+            if exists(multiscale_g_loss):
+                last_multiscale_g_loss = multiscale_g_loss
+
+            if is_first_step or divisible_by(steps, self.log_steps_every):
+                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
+
+            if self.steps %self.save_and_sample_every==0:
+                self.self_save_sample(batch_size, dl_iter)
 
             self.steps += 1
 
