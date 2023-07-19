@@ -1766,8 +1766,7 @@ class GigaGAN(nn.Module):
                 real_images = next(dl_iter)
             else:
                 result = next(dl_iter)
-                assert isinstance(result,
-                                  tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
+                assert isinstance(result, tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
                 real_images, texts = result
 
                 maybe_text_kwargs['texts'] = texts
@@ -1780,15 +1779,17 @@ class GigaGAN(nn.Module):
             size = self.G.input_image_size
             lowres_real_images = F.interpolate(real_images, (size, size))
 
-            G_kwargs = dict(lowres_image=lowres_real_images,
-                replace_rgb_with_input_lowres_image=self.upsampler_replace_rgb_with_input_lowres_image)
+            G_kwargs = dict(
+                lowres_image = lowres_real_images,
+                replace_rgb_with_input_lowres_image = self.upsampler_replace_rgb_with_input_lowres_image
+            )
         else:
             assert exists(batch_size)
 
-            G_kwargs = dict(batch_size=batch_size)
+            G_kwargs = dict(batch_size = batch_size)
 
         if sample:
-            resize = T.Resize(size=self.G.image_size, antialias=False)
+            resize = T.Resize(size = self.G.image_size, antialias = False)
             lowres_real_images = resize(lowres_real_images)
             return G_kwargs, maybe_text_kwargs, lowres_real_images
 
@@ -1990,8 +1991,10 @@ class GigaGAN(nn.Module):
 
     def sample_lambda(self, dl_iter, batch_size):
         if self.train_upsampler:
-            G_kwargs, maybe_text_kwargs, low_res_image = self.generate_kwargs(dl_iter, True)
-            return torch.cat([low_res_image, self.G(**G_kwargs, **maybe_text_kwargs)])
+            G_kwargs, maybe_text_kwargs, low_res_image = self.generate_kwargs(dl_iter, batch_size, sample = True)
+
+            super_resoluted_images = self.G(**G_kwargs, **maybe_text_kwargs)
+            return torch.cat([low_res_image, super_resoluted_images])
         else:
             G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
             return self.G(**G_kwargs, **maybe_text_kwargs)
@@ -2002,27 +2005,33 @@ class GigaGAN(nn.Module):
         batch_size,
         dl_iter = None
     ):
-        self.G.eval()
-
         milestone = self.steps.item() // self.save_and_sample_every
-        batches = num_to_groups(self.num_samples, batch_size)
-        assert exists(batches)
-
-        dl_iter = default(self.val_dl_iter, dl_iter)
-
-        assert exists(dl_iter)
-
         nrow_mult = 2 if self.train_upsampler else 1
 
-        all_images_list = list(map(lambda n: self.sample_lambda(dl_iter, batch_size), batches))
+        sample_models_and_output_file_name = [(self.G, f'sample-{milestone}.png')]
 
-        all_images = torch.cat(all_images_list, dim=0)
+        if self.has_ema_generator:
+            sample_models_and_output_file_name.append((self.G_ema, f'ema-sample-{milestone}.png'))
 
-        utils.save_image(
-            all_images,
-            str(self.results_folder / f'sample-{milestone}.png'),
-            nrow = int(sqrt(self.num_samples)) * nrow_mult
-        )
+        for model, filename in sample_models_and_output_file_name:
+            model.eval()
+
+            batches = num_to_groups(self.num_samples, batch_size)
+            assert exists(batches)
+
+            dl_iter = default(self.val_dl_iter, dl_iter)
+
+            assert exists(dl_iter)
+
+            all_images_list = list(map(lambda n: self.sample_lambda(dl_iter, batch_size), batches))
+
+            all_images = torch.cat(all_images_list, dim=0)
+
+            utils.save_image(
+                all_images,
+                str(self.results_folder / filename),
+                nrow = int(sqrt(self.num_samples)) * nrow_mult
+            )
 
         # Possible to do: Include some metric to save if improved, include some sampler dict text entries
         self.save(str(self.model_folder / f'model-{milestone}.ckpt'))
