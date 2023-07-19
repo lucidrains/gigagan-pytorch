@@ -1794,9 +1794,6 @@ class GigaGAN(nn.Module):
 
             G_kwargs = dict(batch_size = batch_size)
 
-        if sample:
-            return G_kwargs, maybe_text_kwargs, lowres_real_images
-
         return G_kwargs, maybe_text_kwargs
     
     @beartype
@@ -1994,14 +1991,15 @@ class GigaGAN(nn.Module):
         return TrainGenLosses(total_divergence, total_multiscale_divergence)
 
     def sample_lambda(self, dl_iter, batch_size):
-        if self.train_upsampler:
-            G_kwargs, maybe_text_kwargs, low_res_image = self.generate_kwargs(dl_iter, batch_size, sample = True)
+        G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
 
-            super_resoluted_images = self.G(**G_kwargs, **maybe_text_kwargs)
-            return torch.cat([low_res_image, super_resoluted_images])
-        else:
-            G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
-            return self.G(**G_kwargs, **maybe_text_kwargs)
+        generator_output = self.G(**G_kwargs, **maybe_text_kwargs)
+
+        if not self.train_upsampler:
+            return generator_output
+
+        lowres_image = G_kwargs['lowres_image']
+        return torch.cat([lowres_image, generator_output])
 
     @torch.inference_mode()
     def save_sample(
