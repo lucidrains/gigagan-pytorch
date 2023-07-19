@@ -3,9 +3,11 @@ from pathlib import Path
 from math import log2, sqrt
 from functools import partial
 
+from torchvision import utils
+import torchvision.transforms as T
+
 import torch
 import torch.nn.functional as F
-from torchvision import utils
 from torch.optim import Adam
 from torch import nn, einsum, Tensor
 from torch.autograd import grad as torch_grad
@@ -58,12 +60,14 @@ def cycle(dl):
             yield data
 
 def num_to_groups(num, divisor):
-    groups = num // divisor
-    remainder = num % divisor
+    groups, remainder = divmod(num, divisor)
     arr = [divisor] * groups
     if remainder > 0:
         arr.append(remainder)
     return arr
+
+def mkdir_if_not_exists(path):
+    path.mkdir(exist_ok = True, parents = True)
 
 # activation functions
 
@@ -1595,8 +1599,8 @@ class GigaGAN(nn.Module):
         save_and_sample_every = 1000,
         num_samples = 25,
         model_folder = './gigagan-models',
-        results_folder = './results',
-        val_upsampler_dl: torch.utils.data.DataLoader = None
+        results_folder = './gigagan-results',
+        val_upsampler_dl: DataLoader = None
     ):
         super().__init__()
 
@@ -1660,15 +1664,21 @@ class GigaGAN(nn.Module):
         self.register_buffer('steps', torch.ones(1, dtype = torch.long))
 
         # save and sample
+
         self.save_and_sample_every = save_and_sample_every
         self.num_samples = num_samples
-        self.results_folder = results_folder
-        self.model_folder = model_folder
+
         self.val_dl_iter = val_upsampler_dl
+
+        self.results_folder = Path(results_folder)
+        self.model_folder = Path(model_folder)
+
+        mkdir_if_not_exists(self.results_folder)
+        mkdir_if_not_exists(self.model_folder)
 
     def save(self, path, overwrite = True):
         path = Path(path)
-        path.parents[0].mkdir(parents = True, exist_ok =True)
+        mkdir_if_not_exists(path.parents[0])
 
         assert overwrite or not path.exists()
 
@@ -1766,7 +1776,7 @@ class GigaGAN(nn.Module):
             G_kwargs = dict(batch_size=batch_size)
 
         if sample:
-            resize = torchvision.transforms.Resize(size=self.G.image_size, antialias=False)
+            resize = T.Resize(size=self.G.image_size, antialias=False)
             lowres_real_images = resize(lowres_real_images)
             return G_kwargs, maybe_text_kwargs, lowres_real_images
 
@@ -1994,6 +2004,7 @@ class GigaGAN(nn.Module):
         all_images = torch.cat(all_images_list, dim=0)
         utils.save_image(all_images, str(self.results_folder +'/'+ f'sample-{milestone}.png'),
                          nrow=int(sqrt(self.num_samples))*nrow_mult)
+
         # Possible to do: Include some metric to save if improved, include some sampler dict text entries
         self.save(str(self.model_folder+'/'+f'model-{milestone}.ckpt'))
         
@@ -2045,7 +2056,7 @@ class GigaGAN(nn.Module):
             if is_first_step or divisible_by(steps, self.log_steps_every):
                 self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
 
-            if self.steps %self.save_and_sample_every==0:
+            if divisible_by(steps, self.save_and_sample_every):
                 self.self_save_sample(batch_size, dl_iter)
             
             self.steps += 1
