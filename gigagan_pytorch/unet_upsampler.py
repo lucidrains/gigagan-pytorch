@@ -444,6 +444,10 @@ class UnetUpsampler(BaseGenerator):
     def device(self):
         return next(self.parameters()).device
 
+    @property
+    def total_params(self):
+        return sum([p.numel() for p in self.parameters()])
+
     def resize_image_to(self, x, size):
         return F.interpolate(x, (size, size), mode = self.resize_mode)
 

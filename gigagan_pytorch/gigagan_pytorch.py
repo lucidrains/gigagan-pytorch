@@ -25,6 +25,8 @@ from gigagan_pytorch.optimizer import get_optimizer
 
 from tqdm import tqdm
 
+from numerize import numerize
+
 # helpers
 
 def exists(val):
@@ -880,6 +882,10 @@ class Generator(BaseGenerator):
             nn.init.kaiming_normal_(m.weight, a = 0, mode = 'fan_in', nonlinearity = 'leaky_relu')
 
     @property
+    def total_params(self):
+        return sum([p.numel() for p in self.parameters()])
+
+    @property
     def device(self):
         return next(self.parameters()).device
 
@@ -1388,6 +1394,10 @@ class Discriminator(nn.Module):
         return F.interpolate(images, resolution, mode = self.resize_mode)
 
     @property
+    def total_params(self):
+        return sum([p.numel() for p in self.parameters()])
+
+    @property
     def device(self):
         return next(self.parameters()).device
 
@@ -1614,7 +1624,7 @@ class GigaGAN(nn.Module):
         multiscale_divergence_loss_weight = 1.,
         calc_multiscale_loss_every = 1,
         apply_gradient_penalty_every = 4,
-        ttur_mult = 2,
+        ttur_mult = 1,
         train_upsampler = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
         log_steps_every = 20,
@@ -1652,6 +1662,11 @@ class GigaGAN(nn.Module):
 
         self.G = generator
         self.D = discriminator
+
+        # print number of parameters
+
+        print(f'Generator parameters: {numerize.numerize(generator.total_params)}')
+        print(f'Discriminator parameters: {numerize.numerize(discriminator.total_params)}')
 
         # text encoder
 

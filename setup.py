@@ -22,6 +22,7 @@ setup(
     'beartype',
     'einops>=0.6',
     'ema-pytorch',
+    'numerize',
     'open-clip-torch>=2.0.0,<3.0.0',
     'pillow',
     'torch>=1.6',

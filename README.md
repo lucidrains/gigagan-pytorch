@@ -38,7 +38,7 @@ from gigagan_pytorch import (
 
 gan = GigaGAN(
     generator = dict(
-        dim_capacity = 16,
+        dim_capacity = 8,
         style_network = dict(
             dim = 64,
             depth = 4
@@ -89,7 +89,7 @@ gan = GigaGAN(
             dim = 64,
             depth = 4
         ),
-        dim_capacity = 16,
+        dim = 32,
         image_size = 256,
         input_image_size = 128,
         unconditional = True
