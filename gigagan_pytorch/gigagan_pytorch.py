@@ -5,6 +5,7 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
+from torchvision import utils
 from torch.optim import Adam
 from torch import nn, einsum, Tensor
 from torch.autograd import grad as torch_grad
@@ -55,6 +56,14 @@ def cycle(dl):
     while True:
         for data in dl:
             yield data
+
+def num_to_groups(num, divisor):
+    groups = num // divisor
+    remainder = num % divisor
+    arr = [divisor] * groups
+    if remainder > 0:
+        arr.append(remainder)
+    return arr
 
 # activation functions
 
@@ -1582,7 +1591,12 @@ class GigaGAN(nn.Module):
         train_upsampler = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
         log_steps_every = 20,
-        create_ema_generator_at_init = True
+        create_ema_generator_at_init = True,
+        save_and_sample_every = 1000,
+        num_samples = 25,
+        model_folder = './gigagan-models',
+        results_folder = './results',
+        val_upsampler_dl: torch.utils.data.DataLoader = None
     ):
         super().__init__()
 
@@ -1644,6 +1658,13 @@ class GigaGAN(nn.Module):
         self.log_steps_every = log_steps_every
 
         self.register_buffer('steps', torch.ones(1, dtype = torch.long))
+
+        # save and sample
+        self.save_and_sample_every = save_and_sample_every
+        self.num_samples = num_samples
+        self.results_folder = results_folder
+        self.model_folder = model_folder
+        self.val_dl_iter = val_upsampler_dl
 
     def save(self, path, overwrite = True):
         path = Path(path)
@@ -1711,6 +1732,46 @@ class GigaGAN(nn.Module):
     def print(self, msg):
         print(msg)
 
+    def generate_kwargs(self, dl_iter, batch_size, sample = False):
+        # what to pass into the generator
+        # depends on whether training upsampler or not
+
+        maybe_text_kwargs = dict()
+        if self.train_upsampler or not self.unconditional:
+            assert exists(dl_iter)
+
+            if self.unconditional:
+                real_images = next(dl_iter)
+            else:
+                result = next(dl_iter)
+                assert isinstance(result,
+                                  tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
+                real_images, texts = result
+
+                maybe_text_kwargs['texts'] = texts
+
+            real_images = real_images.to(self.device)
+
+        # if training upsample generator, need to downsample real images
+
+        if self.train_upsampler:
+            size = self.G.input_image_size
+            lowres_real_images = F.interpolate(real_images, (size, size))
+
+            G_kwargs = dict(lowres_image=lowres_real_images,
+                replace_rgb_with_input_lowres_image=self.upsampler_replace_rgb_with_input_lowres_image)
+        else:
+            assert exists(batch_size)
+
+            G_kwargs = dict(batch_size=batch_size)
+
+        if sample:
+            resize = torchvision.transforms.Resize(size=self.G.image_size, antialias=False)
+            lowres_real_images = resize(lowres_real_images)
+            return G_kwargs, maybe_text_kwargs, lowres_real_images
+
+        return G_kwargs, maybe_text_kwargs
+    
     @beartype
     def train_discriminator_step(
         self,
@@ -1857,41 +1918,9 @@ class GigaGAN(nn.Module):
 
         for _ in range(grad_accum_every):
 
-            # what to pass into the generator
-            # depends on whether training upsampler or not
-
-            maybe_text_kwargs = dict()
-
-            if self.train_upsampler or not self.unconditional:
-                assert exists(dl_iter)
-
-                if self.unconditional:
-                    real_images = next(dl_iter)
-                else:
-                    result = next(dl_iter)
-                    assert isinstance(result, tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
-                    real_images, texts = result
-
-                    maybe_text_kwargs['texts'] = texts
-
-                real_images = real_images.to(self.device)
-
-            # if training upsample generator, need to downsample real images
-
-            if self.train_upsampler:
-                size = self.G.input_image_size
-                lowres_real_images = F.interpolate(real_images, (size, size))
-
-                G_kwargs = dict(
-                    lowres_image = lowres_real_images,
-                    replace_rgb_with_input_lowres_image = self.upsampler_replace_rgb_with_input_lowres_image
-                )
-            else:
-                assert exists(batch_size)
-
-                G_kwargs = dict(batch_size = batch_size)
-
             # generator
+            
+            G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
 
             image, rgbs = self.G(
                 **G_kwargs,
@@ -1937,6 +1966,37 @@ class GigaGAN(nn.Module):
 
         return TrainGenLosses(total_divergence, total_multiscale_divergence)
 
+    def sample_lambda(self, dl_iter, batch_size):
+        if self.train_upsampler:
+            G_kwargs, maybe_text_kwargs, low_res_image = self.generate_kwargs(dl_iter, True)
+            return torch.cat([low_res_image, self.G(**G_kwargs, **maybe_text_kwargs)])
+        else:
+            G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
+            return self.G(**G_kwargs, **maybe_text_kwargs)
+
+    def self_save_sample(self, batch_size, dl_iter):
+        self.G.eval()
+        with torch.inference_mode():
+
+            milestone = self.steps.item() // self.save_and_sample_every
+            batches = num_to_groups(self.num_samples, batch_size)
+            assert exists(batches)
+
+            if exists(self.val_dl_iter):
+                dl_iter = self.val_dl_iter
+
+            else:
+                assert exists(dl_iter)
+
+            nrow_mult = 2 if self.train_upsampler else 1
+
+            all_images_list = list(map(lambda n: self.sample_lambda(dl_iter, batch_size), batches))
+        all_images = torch.cat(all_images_list, dim=0)
+        utils.save_image(all_images, str(self.results_folder +'/'+ f'sample-{milestone}.png'),
+                         nrow=int(sqrt(self.num_samples))*nrow_mult)
+        # Possible to do: Include some metric to save if improved, include some sampler dict text entries
+        self.save(str(self.model_folder+'/'+f'model-{milestone}.ckpt'))
+        
     @beartype
     def forward(
         self,
@@ -1985,6 +2045,9 @@ class GigaGAN(nn.Module):
             if is_first_step or divisible_by(steps, self.log_steps_every):
                 self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
 
+            if self.steps %self.save_and_sample_every==0:
+                self.self_save_sample(batch_size, dl_iter)
+            
             self.steps += 1
 
         self.print(f'complete {steps} training steps')
