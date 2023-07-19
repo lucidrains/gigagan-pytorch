@@ -8,7 +8,6 @@ import torchvision.transforms as T
 
 import torch
 import torch.nn.functional as F
-from torch.optim import Adam
 from torch import nn, einsum, Tensor
 from torch.autograd import grad as torch_grad
 from torch.utils.data import DataLoader
@@ -23,6 +22,7 @@ from ema_pytorch import EMA
 
 from gigagan_pytorch.version import __version__
 from gigagan_pytorch.open_clip import OpenClipAdapter
+from gigagan_pytorch.optimizer import get_optimizer
 
 from tqdm import tqdm
 
@@ -1233,6 +1233,7 @@ class Discriminator(nn.Module):
         assert is_unique(multiscale_output_resolutions)
         assert all([*map(is_power_of_two, multiscale_output_resolutions)])
         assert all([*map(lambda t: t >= 4, multiscale_output_resolutions)])
+
         assert all([*map(lambda t: t < image_size, multiscale_output_resolutions)])
 
         if len(multiscale_input_resolutions) > 0 and len(multiscale_output_resolutions) > 0:
@@ -1411,14 +1412,20 @@ class Discriminator(nn.Module):
 
         x = images
 
-        assert x.shape[-2:] == (self.image_size, self.image_size)
+        image_size = (self.image_size, self.image_size)
+        assert x.shape[-2:] == image_size
 
         # if real images are passed in, assume `images` are generated, and take care of all the multi-resolution input. this can also be done externally, in which case `real_images` will not be populated
 
         has_real_images = exists(real_images)
 
         if has_real_images:
-            split_batch_size = (x.shape[0], real_images.shape[0])
+            assert real_images.shape[-2:] == image_size, f'images from dataloader must be of size {image_size} but received something else'
+
+            num_fake_images = x.shape[0]
+            num_real_images = real_images.shape[0]
+
+            split_batch_size = (num_fake_images, num_real_images)
             x = torch.cat((x, real_images), dim = 0)
 
         batch = x.shape[0]
@@ -1585,6 +1592,7 @@ class GigaGAN(nn.Module):
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         learning_rate = 1e-4,
         betas = (0.9, 0.99),
+        weight_decay = 0.,
         discr_aux_recon_loss_weight = 0.25,
         multiscale_divergence_loss_weight = 1.,
         calc_multiscale_loss_every = 2,
@@ -1639,8 +1647,8 @@ class GigaGAN(nn.Module):
 
         # optimizers
 
-        self.G_opt = Adam(self.G.parameters(), lr = learning_rate, betas = betas)
-        self.D_opt = Adam(self.D.parameters(), lr = learning_rate, betas = betas)
+        self.G_opt = get_optimizer(self.G.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
+        self.D_opt = get_optimizer(self.D.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
 
         # loss related
 
@@ -1982,7 +1990,7 @@ class GigaGAN(nn.Module):
             return self.G(**G_kwargs, **maybe_text_kwargs)
 
     @torch.inference_mode()
-    def self_save_sample(
+    def save_sample(
         self,
         batch_size,
         dl_iter = None
@@ -2060,8 +2068,8 @@ class GigaGAN(nn.Module):
             if is_first_step or divisible_by(steps, self.log_steps_every):
                 self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
 
-            if divisible_by(steps, self.save_and_sample_every):
-                self.self_save_sample(batch_size, dl_iter)
+            if is_first_step or divisible_by(steps, self.save_and_sample_every):
+                self.save_sample(batch_size, dl_iter)
             
             self.steps += 1
 
