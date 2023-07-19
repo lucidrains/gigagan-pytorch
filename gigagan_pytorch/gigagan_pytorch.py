@@ -1170,7 +1170,10 @@ class Predictor(nn.Module):
         klass = nn.Conv2d if unconditional else partial(AdaptiveConv2DMod, num_conv_kernels = num_conv_kernels)
 
         for ind in range(depth):
-            self.layers.append(klass(dim, dim, 1))
+            self.layers.append(nn.ModuleList([
+                klass(dim, dim, 1),
+                leaky_relu()
+            ]))
 
         self.to_logits = nn.Conv2d(dim, 1, 1)
 
@@ -1182,12 +1185,13 @@ class Predictor(nn.Module):
     ):
         residual = self.residual_fn(x)
 
-        for layer in self.layers:
+        for layer, activation in self.layers:
             kwargs = dict()
             if not self.unconditional:
                 kwargs = dict(mod = mod, kernel_mod = kernel_mod)
 
             x = layer(x, **kwargs)
+            x = activation(x)
 
         x = x + residual
         return self.to_logits(x)
@@ -1608,7 +1612,7 @@ class GigaGAN(nn.Module):
         weight_decay = 0.,
         discr_aux_recon_loss_weight = 0.25,
         multiscale_divergence_loss_weight = 1.,
-        calc_multiscale_loss_every = 2,
+        calc_multiscale_loss_every = 1,
         apply_gradient_penalty_every = 4,
         train_upsampler = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
@@ -1810,6 +1814,9 @@ class GigaGAN(nn.Module):
 
         total_multiscale_divergence = 0. if calc_multiscale_loss else None
 
+        self.G.train()
+        self.D.train()
+
         self.D_opt.zero_grad()
 
         for _ in range(grad_accum_every):
@@ -1920,6 +1927,9 @@ class GigaGAN(nn.Module):
     ):
         total_divergence = 0.
         total_multiscale_divergence = 0. if calc_multiscale_loss else None
+
+        self.G.train()
+        self.D.train()
 
         self.D_opt.zero_grad()
         self.G_opt.zero_grad()
