@@ -1224,8 +1224,7 @@ class Discriminator(nn.Module):
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
         num_skip_layers_excite = 0,
-        unconditional = False,
-        scale_invariant_training = True
+        unconditional = False
     ):
         super().__init__()
         self.unconditional = unconditional
@@ -1297,7 +1296,6 @@ class Discriminator(nn.Module):
             should_skip_layer_excite = not is_first and num_skip_layers_excite > 0 and (ind + num_skip_layers_excite) < len(dim_pairs)
 
             has_attn = resolution in attn_resolutions
-            has_multiscale_input = resolution in multiscale_input_resolutions
             has_multiscale_output = resolution in multiscale_output_resolutions
 
             has_aux_recon_decoder = resolution in aux_recon_resolutions
@@ -1310,13 +1308,7 @@ class Discriminator(nn.Module):
 
             # multi-scale rgb input to feature dimension
 
-            from_rgb = None
-            if has_multiscale_input and scale_invariant_training:
-                from_rgb = nn.Conv2d(channels, dim_in, 7, padding = 3)
-
-            # dim in + channels for the main features
-
-            dim_in = dim_in + (channels if has_multiscale_input else 0)
+            from_rgb = nn.Conv2d(channels, dim_in, 7, padding = 3)
 
             # residual convolution
 
@@ -1483,7 +1475,10 @@ class Discriminator(nn.Module):
                 excite = repeat(excite, 'b ... -> (s b) ...', s = x.shape[0] // excite.shape[0])
                 x = x * excite
 
-            if resolution in self.multiscale_input_resolutions:
+            batch_prev_stage = x.shape[0]
+            has_multiscale_input = resolution in self.multiscale_input_resolutions
+
+            if has_multiscale_input:
                 images_to_concat = rgbs_index.get(resolution, None)
 
                 # if no rgbs passed in, assume all real images, and just resize, though realistically you would concat fake and real images together using helper function `create_real_fake_rgbs` function
@@ -1493,16 +1488,15 @@ class Discriminator(nn.Module):
 
                 images_to_concat = repeat(images_to_concat, 'b ... -> (s b) ...', s = x.shape[0] // images_to_concat.shape[0])
 
-                # concat the rgb (or real images reshaped)
+                multi_scale_input_feats = from_rgb(images_to_concat)
 
-                x = torch.cat((images_to_concat, x), dim = 1)
+                # add the multi-scale input features to the current hidden state from main stem
 
-                # concat the rgb, projected into the feature dimension space
+                images_to_concat = x + multi_scale_input_feats
 
-                if exists(from_rgb):
-                    multi_scale_x = from_rgb(images_to_concat)
-                    multi_scale_x = torch.cat((images_to_concat, multi_scale_x), dim = 1)
-                    x = torch.cat((x, multi_scale_x), dim = 0)
+                # and also concat for scale invariance
+
+                x = torch.cat((x, multi_scale_input_feats), dim = 0)
 
             residual = residual_fn(x)
             x = block(x)
@@ -1517,7 +1511,7 @@ class Discriminator(nn.Module):
 
                 multiscale_outputs_frac = next(iter_multiscale_outputs_frac)
 
-                predictor_input = x
+                predictor_input = x[:batch_prev_stage]
 
                 if multiscale_outputs_frac < 1.:
                     batch_scale = predictor_input.shape[0]
@@ -1619,6 +1613,8 @@ class GigaGAN(nn.Module):
         log_steps_every = 20,
         create_ema_generator_at_init = True,
         save_and_sample_every = 1000,
+        early_save_thres_steps = 1500,
+        early_save_and_sample_every = 100,
         num_samples = 25,
         model_folder = './gigagan-models',
         results_folder = './gigagan-results',
@@ -1688,6 +1684,9 @@ class GigaGAN(nn.Module):
         # save and sample
 
         self.save_and_sample_every = save_and_sample_every
+        self.early_save_thres_steps = early_save_thres_steps
+        self.early_save_and_sample_every = early_save_and_sample_every
+
         self.num_samples = num_samples
 
         self.val_dl_iter = val_upsampler_dl
@@ -2023,6 +2022,8 @@ class GigaGAN(nn.Module):
             all_images_list = list(map(lambda n: self.sample_lambda(dl_iter, n), batches))
             all_images = torch.cat(all_images_list, dim=0)
 
+            all_images.clamp_(0., 1.)
+
             utils.save_image(
                 all_images,
                 str(self.results_folder / filename),
@@ -2080,7 +2081,7 @@ class GigaGAN(nn.Module):
             if is_first_step or divisible_by(steps, self.log_steps_every):
                 self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
 
-            if is_first_step or divisible_by(steps, self.save_and_sample_every):
+            if is_first_step or divisible_by(steps, self.save_and_sample_every) or (steps <= self.early_save_and_sample_every and divisible_by(steps, self.early_save_and_sample_every)):
                 self.save_sample(batch_size, dl_iter)
             
             self.steps += 1
