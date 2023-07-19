@@ -1604,7 +1604,7 @@ class GigaGAN(nn.Module):
         discriminator: Union[Discriminator, Dict],
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         learning_rate = 2e-4,
-        betas = (0.9, 0.99),
+        betas = (0.5, 0.9),
         weight_decay = 0.,
         discr_aux_recon_loss_weight = 0.25,
         multiscale_divergence_loss_weight = 1.,
@@ -1870,7 +1870,7 @@ class GigaGAN(nn.Module):
             if self.multiscale_divergence_loss_weight > 0. and len(multiscale_logits) > 0:
 
                 for multiscale_fake, multiscale_real in multiscale_logits:
-                    multiscale_loss = discriminator_hinge_loss(multiscale_fake, multiscale_real)
+                    multiscale_loss = discriminator_hinge_loss(multiscale_real, multiscale_fake)
                     multiscale_divergence = multiscale_divergence + multiscale_loss
                     multiscale_real_logits.append(multiscale_real)
 
