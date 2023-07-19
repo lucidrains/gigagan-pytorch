@@ -1400,7 +1400,8 @@ class Discriminator(nn.Module):
         text_embeds = None,
         real_images = None,                   # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
         return_all_aux_loss = False,          # this would return auxiliary reconstruction loss for both fake and real
-        return_multiscale_outputs = True      # can force it not to return multi-scale logits
+        return_multiscale_outputs = True,     # can force it not to return multi-scale logits
+        calc_aux_loss = True
     ):
         if not self.unconditional:
             assert exists(texts) ^ exists(text_embeds)
@@ -1534,7 +1535,7 @@ class Discriminator(nn.Module):
             x = x + residual
             x = x * self.residual_scale
 
-            if exists(recon_decoder) and (return_all_aux_loss or has_real_images):
+            if exists(recon_decoder) and calc_aux_loss and (return_all_aux_loss or has_real_images):
 
                 if return_all_aux_loss:
                     recon_output = x[:batch_prev_stage]
@@ -1613,6 +1614,7 @@ class GigaGAN(nn.Module):
         multiscale_divergence_loss_weight = 1.,
         calc_multiscale_loss_every = 1,
         apply_gradient_penalty_every = 4,
+        ttur_mult = 2,
         train_upsampler = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
         log_steps_every = 20,
@@ -1666,7 +1668,7 @@ class GigaGAN(nn.Module):
         # optimizers
 
         self.G_opt = get_optimizer(self.G.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
-        self.D_opt = get_optimizer(self.D.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
+        self.D_opt = get_optimizer(self.D.parameters(), lr = learning_rate * ttur_mult, betas = betas, weight_decay = weight_decay)
 
         # loss related
 
@@ -1956,7 +1958,8 @@ class GigaGAN(nn.Module):
                 image,
                 rgbs,
                 **maybe_text_kwargs,
-                return_multiscale_outputs = calc_multiscale_loss
+                return_multiscale_outputs = calc_multiscale_loss,
+                calc_aux_loss = False
             )
 
             # hinge loss

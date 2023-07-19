@@ -190,3 +190,12 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `-1
     year    = {2022}
 }
 ```
+
+```bibtex
+@inproceedings{Heusel2017GANsTB,
+    title   = {GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium},
+    author  = {Martin Heusel and Hubert Ramsauer and Thomas Unterthiner and Bernhard Nessler and Sepp Hochreiter},
+    booktitle = {NIPS},
+    year    = {2017}
+}
+```
