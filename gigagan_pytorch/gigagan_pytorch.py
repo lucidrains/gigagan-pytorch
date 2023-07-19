@@ -1504,24 +1504,25 @@ class Discriminator(nn.Module):
             if exists(attn):
                 x = attn(x)
 
-            if exists(predictor) and return_multiscale_outputs:
+            if exists(predictor):
                 pred_kwargs = dict()
                 if not self.unconditional:
                     pred_kwargs = dict(mod = next(conv_mods), kernel_mod = next(conv_mods))
 
-                multiscale_outputs_frac = next(iter_multiscale_outputs_frac)
+                if return_multiscale_outputs:
+                    multiscale_outputs_frac = next(iter_multiscale_outputs_frac)
 
-                predictor_input = x[:batch_prev_stage]
+                    predictor_input = x[:batch_prev_stage]
 
-                if multiscale_outputs_frac < 1.:
-                    batch_scale = predictor_input.shape[0]
-                    num_batch_scale = max(int(multiscale_outputs_frac * batch_scale), 1)
-                    rand_indices = torch.randn((batch_scale,), device = self.device).sort(dim = -1).indices
-                    rand_indices = rand_indices[:num_batch_scale]
+                    if multiscale_outputs_frac < 1.:
+                        batch_scale = predictor_input.shape[0]
+                        num_batch_scale = max(int(multiscale_outputs_frac * batch_scale), 1)
+                        rand_indices = torch.randn((batch_scale,), device = self.device).sort(dim = -1).indices
+                        rand_indices = rand_indices[:num_batch_scale]
 
-                    predictor_input = predictor_input[rand_indices]
+                        predictor_input = predictor_input[rand_indices]
 
-                multiscale_outputs.append(predictor(predictor_input, **pred_kwargs))
+                    multiscale_outputs.append(predictor(predictor_input, **pred_kwargs))
 
             if exists(downsample):
                 x = downsample(x)
@@ -1532,7 +1533,7 @@ class Discriminator(nn.Module):
             if exists(recon_decoder) and (return_all_aux_loss or has_real_images):
 
                 if return_all_aux_loss:
-                    recon_output = x
+                    recon_output = x[:batch_prev_stage]
 
                 elif has_real_images:
                     recon_output = rearrange(x, '(s b) ... -> s b ...', b = batch)
