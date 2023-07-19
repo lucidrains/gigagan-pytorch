@@ -712,6 +712,25 @@ class StyleNetwork(nn.Module):
 
         return self.net(x)
 
+# noise
+
+class Noise(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(dim, 1, 1))
+
+    def forward(
+        self,
+        x,
+        noise = None
+    ):
+        b, _, h, w, device = *x.shape, x.device
+
+        if not exists(noise):
+            noise = torch.randn(b, 1, h, w, device = device)
+
+        return x + self.weight * noise
+
 # generator
 
 class BaseGenerator(nn.Module):
@@ -832,8 +851,10 @@ class Generator(BaseGenerator):
 
             resnet_block = nn.ModuleList([
                 adaptive_conv(dim_in, dim_out),
+                Noise(dim_out),
                 leaky_relu(),
                 adaptive_conv(dim_out, dim_out),
+                Noise(dim_out),
                 leaky_relu()
             ])
 
@@ -949,7 +970,7 @@ class Generator(BaseGenerator):
 
         # main network
 
-        for squeeze_excite, (resnet_conv1, act1, resnet_conv2, act2), to_rgb_conv, self_attn, cross_attn, upsample, upsample_rgb in self.layers:
+        for squeeze_excite, (resnet_conv1, noise1, act1, resnet_conv2, noise2, act2), to_rgb_conv, self_attn, cross_attn, upsample, upsample_rgb in self.layers:
 
             if exists(squeeze_excite):
                 skip_excite = squeeze_excite(x)
@@ -960,8 +981,11 @@ class Generator(BaseGenerator):
                 x = x * excite
 
             x = resnet_conv1(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
+            x = noise1(x)
             x = act1(x)
+
             x = resnet_conv2(x, mod = next(conv_mods), kernel_mod = next(conv_mods))
+            x = noise2(x)
             x = act2(x)
 
             if exists(self_attn):
@@ -1015,8 +1039,8 @@ class SimpleDecoder(nn.Module):
         for dim_in, dim_out in zip(dims[:-1], dims[1:]):
             layers.append(nn.Sequential(
                 Upsample(dim_in),
-                conv2d_3x3(dim_in, dim_out * 2),
-                nn.GLU(dim = 1)
+                conv2d_3x3(dim_in, dim_out),
+                leaky_relu()
             ))
 
         self.net = nn.Sequential(*layers)
@@ -1052,8 +1076,7 @@ class SimpleDecoder(nn.Module):
             fmap, orig_image = map(lambda t: rearrange(t, 'b p ... -> (b p) ...'), (fmap, orig_image))
 
         recon = self.net(fmap)
-        losses = F.mse_loss(recon, orig_image, reduction = 'none')
-        return reduce(losses, 'b ... -> b', 'mean')
+        return F.mse_loss(recon, orig_image)
 
 class RandomFixedProjection(nn.Module):
     def __init__(
@@ -1234,7 +1257,6 @@ class Discriminator(nn.Module):
         aux_recon_resolutions: Tuple[int, ...] = (8,),
         aux_recon_patch_dims: Tuple[int, ...] = (2,),
         aux_recon_frac_patches: Tuple[float, ...] = (0.25,),
-        aux_recon_frac_batch_scales: Tuple[float, ...] = (0.25,),
         aux_recon_fmap_dropout: float = 0.5,
         resize_mode = 'bilinear',
         num_conv_kernels = 2,
@@ -1272,11 +1294,9 @@ class Discriminator(nn.Module):
         self.multiscale_output_resolutions = multiscale_output_resolutions
 
         assert all([*map(is_power_of_two, aux_recon_resolutions)])
-        assert all([*map(lambda t: 0 < t <= 1., aux_recon_frac_batch_scales)])
-        assert len(aux_recon_resolutions) == len(aux_recon_patch_dims) == len(aux_recon_frac_patches) == len(aux_recon_frac_batch_scales)
+        assert len(aux_recon_resolutions) == len(aux_recon_patch_dims) == len(aux_recon_frac_patches)
 
         self.aux_recon_resolutions_to_patches = {resolution: (patch_dim, frac_patches) for resolution, patch_dim, frac_patches in zip(aux_recon_resolutions, aux_recon_patch_dims, aux_recon_frac_patches)}
-        self.aux_recon_frac_batch_scales = aux_recon_frac_batch_scales
 
         self.resize_mode = resize_mode
 
@@ -1475,7 +1495,6 @@ class Discriminator(nn.Module):
         # hold auxiliary recon losses
 
         aux_recon_losses = []
-        iter_aux_recon_frac = iter(self.aux_recon_frac_batch_scales)
 
         # excitations
 
@@ -1547,30 +1566,19 @@ class Discriminator(nn.Module):
                 if return_all_aux_loss:
                     recon_output = x[:batch_prev_stage]
 
-                elif has_real_images:
-                    recon_output = rearrange(x, '(s b) ... -> s b ...', b = batch)
-                    _, recon_output = recon_output.split(split_batch_size, dim = 1)
-                    recon_output = rearrange(recon_output, 's b ... -> (s b) ...')
+                recon_output = rearrange(x, '(s b) ... -> s b ...', b = batch)
 
-                aux_recon_target = repeat(aux_recon_target, 'b ... -> (s b) ...', s = recon_output.shape[0] // aux_recon_target.shape[0])
+                if has_real_images:
+                    _, recon_output = recon_output.split(split_batch_size, dim = 1)
+
+                # only use the input real images for aux recon
+
+                recon_output = recon_output[0]
 
                 # only reconstruct a fraction of images across batch and scale
                 # for efficiency
 
-                batch_scale = aux_recon_target.shape[0]
-                batch_scale_frac = next(iter_aux_recon_frac)
-
-                if batch_scale_frac < 1.:
-                    num_batch_scale = max(int(batch_scale_frac * batch_scale), 1)
-                    rand_indices = torch.randn((batch_scale,), device = self.device).sort(dim = -1).indices
-                    rand_indices = rand_indices[:num_batch_scale]
-
-                    recon_output = recon_output[rand_indices]
-                    aux_recon_target = aux_recon_target[rand_indices]
-
                 aux_recon_loss = recon_decoder(recon_output, aux_recon_target)
-                aux_recon_loss = aux_recon_loss.mean() # todo - separate SSL for main branch vs multiscale outputs
-
                 aux_recon_losses.append(aux_recon_loss)
 
         logits = self.to_logits(x)   
@@ -1618,7 +1626,7 @@ class GigaGAN(nn.Module):
         betas = (0.5, 0.9),
         weight_decay = 0.,
         discr_aux_recon_loss_weight = 0.25,
-        multiscale_divergence_loss_weight = 1.,
+        multiscale_divergence_loss_weight = 0.1,
         calc_multiscale_loss_every = 1,
         apply_gradient_penalty_every = 4,
         ttur_mult = 1,
@@ -1815,6 +1823,12 @@ class GigaGAN(nn.Module):
             assert exists(batch_size)
 
             G_kwargs = dict(batch_size = batch_size)
+
+        # create noise
+
+        noise = torch.randn(batch_size, self.G.style_network.dim, device = self.device)
+
+        G_kwargs.update(noise = noise)
 
         return G_kwargs, maybe_text_kwargs
     
