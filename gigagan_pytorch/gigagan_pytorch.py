@@ -721,10 +721,9 @@ class Generator(BaseGenerator):
     def __init__(
         self,
         *,
-        dim,
+        dim_capacity = 16,
         image_size,
         dim_max = 2048,
-        capacity = 16,
         channels = 3,
         style_network: Optional[Union[StyleNetwork, Dict]] = None,
         style_network_dim = None,
@@ -744,7 +743,6 @@ class Generator(BaseGenerator):
         unconditional = False
     ):
         super().__init__()
-        self.dim = dim
         self.channels = channels
 
         if isinstance(style_network, dict):
@@ -802,7 +800,7 @@ class Generator(BaseGenerator):
         resolutions = image_size / ((2 ** torch.arange(num_layers)))
         resolutions = resolutions.long().tolist()
 
-        dim_layers = (2 ** (torch.arange(num_layers) + 1)) * capacity
+        dim_layers = (2 ** (torch.arange(num_layers) + 1)) * dim_capacity
         dim_layers.clamp_(max = dim_max)
 
         dim_layers = torch.flip(dim_layers, (0,))
@@ -1194,9 +1192,8 @@ class Discriminator(nn.Module):
     def __init__(
         self,
         *,
-        dim,
+        dim_capacity = 16,
         image_size,
-        capacity = 16,
         dim_max = 2048,
         channels = 3,
         attn_resolutions: Tuple[int, ...] = (32, 16),
@@ -1261,7 +1258,7 @@ class Discriminator(nn.Module):
         resolutions = image_size / ((2 ** torch.arange(num_layers)))
         resolutions = resolutions.long().tolist()
 
-        dim_layers = (2 ** (torch.arange(num_layers) + 1)) * capacity
+        dim_layers = (2 ** (torch.arange(num_layers) + 1)) * dim_capacity
         dim_layers = F.pad(dim_layers, (1, 0), value = channels)
         dim_layers.clamp_(max = dim_max)
 
