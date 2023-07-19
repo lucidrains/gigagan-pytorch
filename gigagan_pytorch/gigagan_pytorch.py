@@ -1996,6 +1996,11 @@ class GigaGAN(nn.Module):
     ):
         milestone = self.steps.item() // self.save_and_sample_every
         nrow_mult = 2 if self.train_upsampler else 1
+        batches = num_to_groups(self.num_samples, batch_size)
+
+        dl_iter = default(self.val_dl_iter, dl_iter)
+
+        assert exists(dl_iter)
 
         sample_models_and_output_file_name = [(self.G, f'sample-{milestone}.png')]
 
@@ -2005,15 +2010,7 @@ class GigaGAN(nn.Module):
         for model, filename in sample_models_and_output_file_name:
             model.eval()
 
-            batches = num_to_groups(self.num_samples, batch_size)
-            assert exists(batches)
-
-            dl_iter = default(self.val_dl_iter, dl_iter)
-
-            assert exists(dl_iter)
-
-            all_images_list = list(map(lambda n: self.sample_lambda(dl_iter, batch_size), batches))
-
+            all_images_list = list(map(lambda n: self.sample_lambda(dl_iter, n), batches))
             all_images = torch.cat(all_images_list, dim=0)
 
             utils.save_image(
