@@ -1486,9 +1486,13 @@ class Discriminator(nn.Module):
                 if not exists(images_to_concat):
                     images_to_concat = self.resize_image_to(images, resolution)
 
-                images_to_concat = repeat(images_to_concat, 'b ... -> (s b) ...', s = x.shape[0] // images_to_concat.shape[0])
+                # multi-scale input features
 
                 multi_scale_input_feats = from_rgb(images_to_concat)
+
+                # expand multi-scale input features, as could include extra scales from previous stage
+
+                multi_scale_input_feats = repeat(multi_scale_input_feats, 'b ... -> (s b) ...', s = x.shape[0] // images_to_concat.shape[0])
 
                 # add the multi-scale input features to the current hidden state from main stem
 
