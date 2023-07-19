@@ -4,7 +4,6 @@ from math import log2, sqrt
 from functools import partial
 
 from torchvision import utils
-import torchvision.transforms as T
 
 import torch
 import torch.nn.functional as F
@@ -1047,7 +1046,8 @@ class SimpleDecoder(nn.Module):
             fmap, orig_image = map(lambda t: rearrange(t, 'b p ... -> (b p) ...'), (fmap, orig_image))
 
         recon = self.net(fmap)
-        return F.mse_loss(recon, orig_image)
+        losses = F.mse_loss(recon, orig_image, reduction = 'none')
+        return reduce(losses, 'b ... -> b', 'mean')
 
 class RandomFixedProjection(nn.Module):
     def __init__(
@@ -1208,8 +1208,9 @@ class Discriminator(nn.Module):
         ff_mult = 4,
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         text_dim = None,
+        filter_input_resolutions: bool = True,
         multiscale_input_resolutions: Tuple[int, ...] = (64, 32, 16, 8),
-        multiscale_output_resolutions: Tuple[int, ...] = (32, 16, 8, 4),
+        multiscale_output_skip_stages: int = 1,
         multiscale_output_batch_scales_frac: Union[float, Tuple[float, ...]] = 1.,
         aux_recon_resolutions: Tuple[int, ...] = (8,),
         aux_recon_patch_dims: Tuple[int, ...] = (2,),
@@ -1229,15 +1230,18 @@ class Discriminator(nn.Module):
         assert is_power_of_two(image_size)
         assert all([*map(is_power_of_two, attn_resolutions)])
 
+        if filter_input_resolutions:
+            multiscale_input_resolutions = [*filter(lambda t: t < image_size, multiscale_input_resolutions)]
+
         assert is_unique(multiscale_input_resolutions)
         assert all([*map(is_power_of_two, multiscale_input_resolutions)])
-        assert all([*map(lambda t: t >= 4, multiscale_input_resolutions)])
         assert all([*map(lambda t: t < image_size, multiscale_input_resolutions)])
 
         self.multiscale_input_resolutions = multiscale_input_resolutions
 
-        assert is_unique(multiscale_output_resolutions)
-        assert all([*map(is_power_of_two, multiscale_output_resolutions)])
+        assert multiscale_output_skip_stages > 0
+        multiscale_output_resolutions = [resolution // (2 ** multiscale_output_skip_stages) for resolution in multiscale_input_resolutions]
+
         assert all([*map(lambda t: t >= 4, multiscale_output_resolutions)])
 
         assert all([*map(lambda t: t < image_size, multiscale_output_resolutions)])
@@ -1554,6 +1558,8 @@ class Discriminator(nn.Module):
                     aux_recon_target = aux_recon_target[rand_indices]
 
                 aux_recon_loss = recon_decoder(recon_output, aux_recon_target)
+                aux_recon_loss = aux_recon_loss.mean() # todo - separate SSL for main branch vs multiscale outputs
+
                 aux_recon_losses.append(aux_recon_loss)
 
         logits = self.to_logits(x)   
@@ -1789,8 +1795,6 @@ class GigaGAN(nn.Module):
             G_kwargs = dict(batch_size = batch_size)
 
         if sample:
-            resize = T.Resize(size = self.G.image_size, antialias = False)
-            lowres_real_images = resize(lowres_real_images)
             return G_kwargs, maybe_text_kwargs, lowres_real_images
 
         return G_kwargs, maybe_text_kwargs
