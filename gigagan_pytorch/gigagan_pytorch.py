@@ -1760,7 +1760,7 @@ class GigaGAN(nn.Module):
     def print(self, msg):
         print(msg)
 
-    def generate_kwargs(self, dl_iter, batch_size, sample = False):
+    def generate_kwargs(self, dl_iter, batch_size):
         # what to pass into the generator
         # depends on whether training upsampler or not
 
@@ -1830,23 +1830,7 @@ class GigaGAN(nn.Module):
 
             # for discriminator training, fit upsampler and image synthesis logic under same function
 
-            if self.train_upsampler:
-                size = self.G.input_image_size
-                lowres_real_images = F.interpolate(real_images, (size, size))
-
-                G_kwargs = dict(
-                    lowres_image = lowres_real_images,
-                    replace_rgb_with_input_lowres_image = self.upsampler_replace_rgb_with_input_lowres_image
-                )
-            else:
-                G_kwargs = dict(batch_size = batch_size)
-
-            # add texts for conditioning if needed
-
-            maybe_text_kwargs = dict()
-
-            if not self.unconditional:
-                maybe_text_kwargs['texts'] = texts
+            G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
 
             # generator
 
