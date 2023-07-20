@@ -148,6 +148,22 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0`
 
 `GP` and `SSL` should be pushed towards `0`. `GP` can occasionally spike; I like to imagine it as the networks undergoing some epiphany
 
+## Multi-GPU Training
+
+The `GigaGAN` class is now equipped with <a href="https://huggingface.co/docs/accelerate/accelerator">🤗 Accelerator</a>. You can easily do multi-gpu training in two steps using their `accelerate` CLI
+
+At the project root directory, where the training script is, run
+
+```python
+$ accelerate config
+```
+
+Then, in the same directory
+
+```python
+$ accelerate launch train.py
+```
+
 ## Todo
 
 - [x] make sure it can be trained unconditionally
@@ -173,7 +189,7 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0`
 - [ ] add accelerate
     - [x] works single machine
     - [x] works for mixed precision (make sure gradient penalty is scaled correctly), take care of manual scaler saving and reloading, borrow from imagen-pytorch
-    - [ ] make sure it works multi-GPU for one machine
+    - [x] make sure it works multi-GPU for one machine
     - [ ] have someone else try multiple machines
 
 - [ ] add ability to select a random subset from multiscale dimension, for efficiency

@@ -1668,6 +1668,7 @@ class GigaGAN(nn.Module):
         sample_upsampler_dl: Optional[DataLoader] = None,
         accelerator: Optional[Accelerator] = None,
         accelerate_kwargs: dict = {},
+        find_unused_parameters = False,
         amp = False,
         mixed_precision_type = 'fp16'
     ):
@@ -1679,7 +1680,7 @@ class GigaGAN(nn.Module):
             self.accelerator = accelerator
             assert is_empty(accelerate_kwargs)
         else:
-            kwargs = DistributedDataParallelKwargs(find_unused_parameters = True)
+            kwargs = DistributedDataParallelKwargs(find_unused_parameters = find_unused_parameters)
 
             self.accelerator = Accelerator(
                 kwargs_handlers = [kwargs],
@@ -1726,8 +1727,8 @@ class GigaGAN(nn.Module):
 
         # print number of parameters
 
-        print(f'Generator parameters: {numerize.numerize(generator.total_params)}')
-        print(f'Discriminator parameters: {numerize.numerize(discriminator.total_params)}')
+        self.print(f'Generator parameters: {numerize.numerize(generator.total_params)}')
+        self.print(f'Discriminator parameters: {numerize.numerize(discriminator.total_params)}')
 
         # text encoder
 
@@ -1932,7 +1933,7 @@ class GigaGAN(nn.Module):
 
         # create noise
 
-        noise = torch.randn(batch_size, self.G.style_network.dim, device = self.device)
+        noise = torch.randn(batch_size, self.unwrapped_G.style_network.dim, device = self.device)
 
         G_kwargs.update(noise = noise)
 
