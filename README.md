@@ -161,7 +161,17 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0`
 - [x] make recon more efficient by random sampling patches
 
 - [ ] add accelerate
+    - [x] works single machine
+    - [ ] works for mixed precision (make sure gradient penalty is scaled correctly), take care of manual scaler saving and reloading, borrow from imagen-pytorch
+    - [ ] make sure it works multi-GPU for one machine
+    - [ ] have someone else try multiple machines
+
+- [ ] add ability to select a random subset from multiscale dimension, for efficiency
+- [ ] make sure text encoder can also accept pre-encoded CLIP embeddings
+
 - [ ] do a review of the auxiliary losses
+    - [ ] add vision aided loss and make sure it trains, inspect output
+
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image
 
