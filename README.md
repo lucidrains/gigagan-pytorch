@@ -135,9 +135,9 @@ gan(
 * `GP` - Gradient Penalty
 * `SSL` - Auxiliary Reconstruction in Discriminator (from Lightweight GAN)
 
-A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `-10` to `10`, and usually staying pretty constant. If at any time after 1k training steps these values persist at triple digits, that would mean something is wrong.
+A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0` to `10`, and usually staying pretty constant. If at any time after 1k training steps these values persist at triple digits, that would mean something is wrong. It is ok for generator and discriminator values to occasionally dip negative, but it should swing back up to the range above.
 
-`GP` and `SSL` should be pushed towards `0`. `GP` can occasionally spike; I like to imagine it as the networks undergoing some phase shift.
+`GP` and `SSL` should be pushed towards `0`. `GP` can occasionally spike; I like to imagine it as the networks undergoing some epiphany
 
 ## Todo
 

@@ -27,10 +27,17 @@ from tqdm import tqdm
 
 from numerize import numerize
 
+from accelerate import Accelerator, DistributedType
+from accelerate.utils import DistributedDataParallelKwargs
+
 # helpers
 
 def exists(val):
     return val is not None
+
+@beartype
+def is_empty(arr: Union[Tuple, Dict, List]):
+    return len(arr) == 0
 
 def default(*vals):
     for val in vals:
@@ -1011,7 +1018,7 @@ class Generator(BaseGenerator):
 
         # sanity check
 
-        assert len([*conv_mods]) == 0, 'convolutions were incorrectly modulated'
+        assert is_empty([*conv_mods]), 'convolutions were incorrectly modulated'
 
         if return_all_rgbs:
             return rgb, rgbs
@@ -1566,7 +1573,7 @@ class Discriminator(nn.Module):
 
         # sanity check
 
-        assert self.unconditional or len([*conv_mods]) == 0, 'convolutions were incorrectly modulated'
+        assert self.unconditional or is_empty([*conv_mods]), 'convolutions were incorrectly modulated'
 
         # to logits
 
@@ -1615,22 +1622,37 @@ class GigaGAN(nn.Module):
         num_samples = 25,
         model_folder = './gigagan-models',
         results_folder = './gigagan-results',
-        val_upsampler_dl: DataLoader = None
+        sample_upsampler_dl: Optional[DataLoader] = None,
+        accelerator: Optional[Accelerator] = None,
+        accelerate_kwargs: dict = {}
     ):
         super().__init__()
 
+        # create accelerator
+
+        if accelerator:
+            self.accelerator = accelerator
+            assert is_empty(accelerate_kwargs)
+        else:
+            kwargs = DistributedDataParallelKwargs(find_unused_parameters = True)
+            self.accelerator = Accelerator(kwargs_handlers = [kwargs], **accelerate_kwargs)
+
+        # whether to train upsampler or not
+
         self.train_upsampler = train_upsampler
-
-        self.upsampler_replace_rgb_with_input_lowres_image = upsampler_replace_rgb_with_input_lowres_image
-
-        self.apply_gradient_penalty_every = apply_gradient_penalty_every
-        self.calc_multiscale_loss_every = calc_multiscale_loss_every
 
         if train_upsampler:
             from gigagan_pytorch.unet_upsampler import UnetUpsampler
             generator_klass = UnetUpsampler
         else:
             generator_klass = Generator
+
+        self.upsampler_replace_rgb_with_input_lowres_image = upsampler_replace_rgb_with_input_lowres_image
+
+        # gradient penalty and auxiliary recon loss
+
+        self.apply_gradient_penalty_every = apply_gradient_penalty_every
+        self.calc_multiscale_loss_every = calc_multiscale_loss_every
 
         if isinstance(generator, dict):
             generator = generator_klass(**generator)
@@ -1665,6 +1687,10 @@ class GigaGAN(nn.Module):
         self.G_opt = get_optimizer(self.G.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
         self.D_opt = get_optimizer(self.D.parameters(), lr = learning_rate * ttur_mult, betas = betas, weight_decay = weight_decay)
 
+        # prepare for distributed
+
+        self.G, self.D, self.G_opt, self.D_opt = self.accelerator.prepare(self.G, self.D, self.G_opt, self.D_opt)
+
         # loss related
 
         self.discr_aux_recon_loss_weight = discr_aux_recon_loss_weight
@@ -1674,7 +1700,7 @@ class GigaGAN(nn.Module):
 
         self.has_ema_generator = False
 
-        if create_ema_generator_at_init:
+        if self.is_main and create_ema_generator_at_init:
             self.create_ema_generator()
 
         # steps
@@ -1691,7 +1717,11 @@ class GigaGAN(nn.Module):
 
         self.num_samples = num_samples
 
-        self.val_dl_iter = val_upsampler_dl
+        self.train_dl = None
+
+        self.sample_upsampler_dl_iter = None
+        if exists(sample_upsampler_dl):
+            self.sample_upsampler_dl_iter = cycle(self.sample_upsampler_dl)
 
         self.results_folder = Path(results_folder)
         self.model_folder = Path(model_folder)
@@ -1747,9 +1777,37 @@ class GigaGAN(nn.Module):
             self.print(f'unable to load optimizers {e.msg}- optimizer states will be reset')
             pass
 
+    # accelerate related
+
     @property
     def device(self):
-        return self.steps.device
+        return self.accelerator.device
+
+    def print(self, msg):
+        self.accelerator.print(msg)
+
+    @property
+    def is_distributed(self):
+        return not (self.accelerator.distributed_type == DistributedType.NO and self.accelerator.num_processes == 1)
+
+    @property
+    def is_main(self):
+        return self.accelerator.is_main_process
+
+    @property
+    def is_local_main(self):
+        return self.accelerator.is_local_main_process
+
+    @beartype
+    def set_dataloader(self, dl: DataLoader):
+        assert not exists(self.train_dl), 'training dataloader has already been set'
+
+        self.train_dl = dl
+        self.train_dl_batch_size = dl.batch_size
+
+        self.train_dl = self.accelerator.prepare(self.train_dl)
+
+    # create EMA generator
 
     def create_ema_generator(
         self,
@@ -1757,13 +1815,13 @@ class GigaGAN(nn.Module):
         update_after_step = 100,
         decay = 0.995
     ):
+        if not self.is_main:
+            return
+
         assert not self.has_ema_generator, 'EMA generator has already been created'
 
         self.has_ema_generator = True
         self.G_ema = EMA(self.G, update_every = update_every, update_after_step = update_after_step, beta = decay)
-
-    def print(self, msg):
-        print(msg)
 
     def generate_kwargs(self, dl_iter, batch_size):
         # what to pass into the generator
@@ -1923,7 +1981,7 @@ class GigaGAN(nn.Module):
 
             # backwards
 
-            (total_loss / grad_accum_every).backward()
+            self.accelerator.backward(total_loss / grad_accum_every)
 
         self.D_opt.step()
 
@@ -1985,7 +2043,7 @@ class GigaGAN(nn.Module):
 
                 total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
 
-            (total_loss / grad_accum_every).backward()
+            self.accelerator.backward(total_loss / grad_accum_every)
 
         self.G_opt.step()
 
@@ -2020,7 +2078,8 @@ class GigaGAN(nn.Module):
         nrow_mult = 2 if self.train_upsampler else 1
         batches = num_to_groups(self.num_samples, batch_size)
 
-        dl_iter = default(self.val_dl_iter, dl_iter)
+        if self.train_upsampler:
+            dl_iter = default(self.sample_upsampler_dl_iter, dl_iter)
 
         assert exists(dl_iter)
 
@@ -2051,11 +2110,12 @@ class GigaGAN(nn.Module):
         self,
         *,
         steps,
-        dataloader: DataLoader,
         grad_accum_every = 1
     ):
-        batch_size = dataloader.batch_size
-        dl_iter = cycle(dataloader)
+        assert exists(self.train_dl), 'you need to set the dataloader by running .set_dataloader(dl: Dataloader)'
+
+        batch_size = self.train_dl_batch_size
+        dl_iter = cycle(self.train_dl)
 
         last_gp_loss = 0.
         last_multiscale_d_loss = 0.
@@ -2069,11 +2129,13 @@ class GigaGAN(nn.Module):
             calc_multiscale_loss =  self.calc_multiscale_loss_every > 0 and divisible_by(steps, self.calc_multiscale_loss_every)
 
             d_loss, multiscale_d_loss, gp_loss, recon_loss = self.train_discriminator_step(
-                dl_iter,
+                dl_iter = dl_iter,
                 grad_accum_every = grad_accum_every,
                 apply_gradient_penalty = apply_gradient_penalty,
                 calc_multiscale_loss = calc_multiscale_loss
             )
+
+            self.accelerator.wait_for_everyone()
 
             g_loss, multiscale_g_loss = self.train_generator_step(
                 dl_iter = dl_iter,
@@ -2094,7 +2156,9 @@ class GigaGAN(nn.Module):
             if is_first_step or divisible_by(steps, self.log_steps_every):
                 self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
 
-            if is_first_step or divisible_by(steps, self.save_and_sample_every) or (steps <= self.early_save_thres_steps and divisible_by(steps, self.early_save_and_sample_every)):
+            self.accelerator.wait_for_everyone()
+
+            if self.is_main and (is_first_step or divisible_by(steps, self.save_and_sample_every) or (steps <= self.early_save_thres_steps and divisible_by(steps, self.early_save_and_sample_every))):
                 self.save_sample(batch_size, dl_iter)
             
             self.steps += 1

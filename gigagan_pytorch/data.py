@@ -74,7 +74,7 @@ class ImageDataset(Dataset):
         ])
 
     def get_dataloader(self, *args, **kwargs):
-        return DataLoader(self, *args, shuffle = True, **kwargs)
+        return DataLoader(self, *args, shuffle = True, drop_last = True, **kwargs)
 
     def __len__(self):
         return len(self.paths)
