@@ -163,6 +163,7 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0`
 - [x] make unconditional work for both base generator and upsampler
 - [x] make text conditioned training work for both base and upsampler
 - [x] make recon more efficient by random sampling patches
+- [x] make sure generator and discriminator can also accept pre-encoded CLIP text encodings
 
 - [ ] add accelerate
     - [x] works single machine
@@ -171,7 +172,6 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0`
     - [ ] have someone else try multiple machines
 
 - [ ] add ability to select a random subset from multiscale dimension, for efficiency
-- [ ] make sure text encoder can also accept pre-encoded CLIP embeddings
 
 - [ ] do a review of the auxiliary losses
     - [ ] add vision aided loss and make sure it trains, inspect output

@@ -125,7 +125,7 @@ def gradient_penalty(
 
     if exists(scaler):
         scale = scaler.get_scale()
-        inv_scale = 1. / max(scale, 1e-5)
+        inv_scale = 1. / max(scale, 1e-6)
         gradients = maybe_scaled_gradients * inv_scale
 
     gradients = rearrange(gradients, 'b ... -> b (...)')
@@ -945,6 +945,7 @@ class Generator(BaseGenerator):
         styles = None,
         noise = None,
         texts: Optional[List[str]] = None,
+        text_encodings: Optional[Tensor] = None,
         global_text_tokens = None,
         fine_text_tokens = None,
         text_mask = None,
@@ -956,9 +957,16 @@ class Generator(BaseGenerator):
         # and fine text tokens to attend to using cross attention
 
         if not self.unconditional:
-            if exists(texts):
+            if exists(texts) or exists(text_encodings):
+                assert exists(texts) ^ exists(text_encodings), 'either raw texts as List[str] or text_encodings (from clip) as Tensor is passed in, but not both'
                 assert exists(self.text_encoder)
-                global_text_tokens, fine_text_tokens, text_mask = self.text_encoder(texts)
+
+                if exists(texts):
+                    text_encoder_kwargs = dict(texts = texts)
+                elif exists(text_encodings):
+                    text_encoder_kwargs = dict(text_encodings = text_encodings)
+
+                global_text_tokens, fine_text_tokens, text_mask = self.text_encoder(**text_encoder_kwargs)
             else:
                 assert all([*map(exists, (global_text_tokens, fine_text_tokens, text_mask))]), 'raw text or text embeddings were not passed in for conditional training'
         else:
@@ -1470,17 +1478,22 @@ class Discriminator(nn.Module):
         images,
         rgbs: Optional[List[Tensor]] = None,  # multi-resolution inputs (rgbs) from the generator
         texts: Optional[List[str]] = None,
+        text_encodings: Optional[Tensor] = None,
         text_embeds = None,
         real_images = None,                   # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
         return_multiscale_outputs = True,     # can force it not to return multi-scale logits
         calc_aux_loss = True
     ):
         if not self.unconditional:
-            assert exists(texts) ^ exists(text_embeds)
+            assert (exists(texts) ^ exists(text_encodings)) ^ exists(text_embeds), 'either texts as List[str] is passed in, or clip text_encodings as Tensor'
 
             if exists(texts):
                 assert exists(self.text_encoder)
-                text_embeds, *_ = self.text_encoder(texts)
+                text_embeds, *_ = self.text_encoder(texts = texts)
+
+            elif exists(text_encodings):
+                assert exists(self.text_encoder)
+                text_embeds, *_ = self.text_encoder(text_encodings = text_encodings)
 
             assert exists(text_embeds), 'raw text or text embeddings were not passed into discriminator for conditional training'
 
