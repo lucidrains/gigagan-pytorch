@@ -60,7 +60,8 @@ gan = GigaGAN(
         image_size = 256,
         num_skip_layers_excite = 4,
         unconditional = True
-    )
+    ),
+    amp = True
 ).cuda()
 
 # dataset
@@ -89,7 +90,10 @@ For unconditional Unet Upsampler
 
 ```python
 import torch
-from gigagan_pytorch import GigaGAN, ImageDataset
+from gigagan_pytorch import (
+    GigaGAN,
+    ImageDataset
+)
 
 gan = GigaGAN(
     train_upsampler = True,     # set this to True
@@ -109,7 +113,8 @@ gan = GigaGAN(
         image_size = 256,
         num_skip_layers_excite = 4,
         unconditional = True
-    )
+    ),
+    amp = True
 ).cuda()
 
 dataset = ImageDataset(
