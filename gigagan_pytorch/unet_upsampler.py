@@ -565,6 +565,8 @@ class UnetUpsampler(BaseGenerator):
 
         x = self.final_res_block(x, conv_mods_iter = conv_mods)
 
+        assert len([*conv_mods]) == 0
+
         rgb = rgb + self.final_to_rgb(x)
 
         if not return_all_rgbs:

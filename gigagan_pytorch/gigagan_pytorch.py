@@ -1006,6 +1006,10 @@ class Generator(BaseGenerator):
             if exists(upsample_rgb):
                 rgb = upsample_rgb(rgb)
 
+        # sanity check
+
+        assert len([*conv_mods]) == 0, 'convolutions were incorrectly modulated'
+
         if return_all_rgbs:
             return rgb, rgbs
 
@@ -1556,6 +1560,12 @@ class Discriminator(nn.Module):
 
                 aux_recon_loss = recon_decoder(recon_output, aux_recon_target)
                 aux_recon_losses.append(aux_recon_loss)
+
+        # sanity check
+
+        assert self.unconditional or len([*conv_mods]) == 0, 'convolutions were incorrectly modulated'
+
+        # to logits
 
         logits = self.to_logits(x)   
         logits = rearrange(logits, '(s b) ... -> s b ...', b = batch)
