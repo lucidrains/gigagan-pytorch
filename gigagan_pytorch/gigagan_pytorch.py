@@ -782,11 +782,11 @@ class Generator(BaseGenerator):
         self_attn_dim_head = 64,
         self_attn_heads = 8,
         self_attn_dot_product = True,
-        self_ff_mult = 4,
+        self_attn_ff_mult = 4,
         cross_attn_resolutions: Tuple[int, ...] = (32, 16),
         cross_attn_dim_head = 64,
         cross_attn_heads = 8,
-        cross_ff_mult = 4,
+        cross_attn_ff_mult = 4,
         num_conv_kernels = 2,  # the number of adaptive conv kernels
         num_skip_layers_excite = 0,
         unconditional = False,
@@ -902,10 +902,22 @@ class Generator(BaseGenerator):
             rgb_upsample = Upsample(channels) if should_upsample_rgb else None
 
             if has_self_attn:
-                self_attn = SelfAttentionBlock(dim_out, dot_product = self_attn_dot_product)
+                self_attn = SelfAttentionBlock(
+                    dim_out,
+                    self_attn_dim_head=self_attn_dim_head,
+                    self_attn_heads=self_attn_heads,
+                    self_attn_ff_mult=self_attn_ff_mult,
+                    dot_product = self_attn_dot_product
+            )
 
             if has_cross_attn:
-                cross_attn = CrossAttentionBlock(dim_out, dim_context = text_encoder.dim)
+                cross_attn = CrossAttentionBlock(
+                    dim_out,
+                    dim_context = text_encoder.dim,
+                    cross_attn_dim_head = cross_attn_dim_head,
+                    cross_attn_heads = cross_attn_heads,
+                    cross_attn_ff_mult = cross_attn_ff_mult,
+                )
 
             style_embed_split_dims.extend([
                 dim_in,             # for first conv in resnet block
