@@ -1438,7 +1438,6 @@ class Discriminator(nn.Module):
         texts: Optional[List[str]] = None,
         text_embeds = None,
         real_images = None,                   # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
-        return_all_aux_loss = False,          # this would return auxiliary reconstruction loss for both fake and real
         return_multiscale_outputs = True,     # can force it not to return multi-scale logits
         calc_aux_loss = True
     ):
@@ -1476,8 +1475,6 @@ class Discriminator(nn.Module):
             x = torch.cat((x, real_images), dim = 0)
 
         batch = x.shape[0]
-
-        aux_recon_target = real_images if has_real_images else x
 
         assert not (has_real_images and not exists(rgbs)) 
 
@@ -1561,15 +1558,16 @@ class Discriminator(nn.Module):
             x = x + residual
             x = x * self.residual_scale
 
-            if exists(recon_decoder) and calc_aux_loss and (return_all_aux_loss or has_real_images):
+            if exists(recon_decoder) and calc_aux_loss:
 
-                if return_all_aux_loss:
-                    recon_output = x[:batch_prev_stage]
-
+                recon_output = x[:batch_prev_stage]
                 recon_output = rearrange(x, '(s b) ... -> s b ...', b = batch)
 
                 if has_real_images:
                     _, recon_output = recon_output.split(split_batch_size, dim = 1)
+                    aux_recon_target = real_images
+                else:
+                    aux_recon_target = images
 
                 # only use the input real images for aux recon
 
