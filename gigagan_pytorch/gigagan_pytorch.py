@@ -1654,7 +1654,6 @@ class GigaGAN(nn.Module):
         *,
         generator: Union[BaseGenerator, Dict],
         discriminator: Union[Discriminator, Dict],
-        text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         learning_rate = 2e-4,
         betas = (0.5, 0.9),
         weight_decay = 0.,
@@ -1739,12 +1738,6 @@ class GigaGAN(nn.Module):
         self.print(f'Discriminator parameters: {numerize.numerize(discriminator.total_params)}')
 
         # text encoder
-
-        if exists(text_encoder):
-            if isinstance(text_encoder, dict):
-                text_encoder = TextEncoder(**text_encoder)
-
-        self.text_encoder = text_encoder
 
         assert generator.unconditional == discriminator.unconditional
 
