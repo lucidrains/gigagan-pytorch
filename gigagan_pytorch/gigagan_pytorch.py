@@ -827,7 +827,7 @@ class Generator(BaseGenerator):
         dim_layers = F.pad(dim_layers, (1, 0), value = dim_latent)
 
         dim_layers = dim_layers.tolist()
-        dim_layers[-1]
+
         dim_pairs = list(zip(dim_layers[:-1], dim_layers[1:]))
 
         self.num_skip_layers_excite = num_skip_layers_excite
@@ -838,7 +838,10 @@ class Generator(BaseGenerator):
 
         for ind, ((dim_in, dim_out), resolution) in enumerate(zip(dim_pairs, resolutions)):
             is_last = (ind + 1) == len(dim_pairs)
-            should_upsample = not is_last
+            is_first = ind == 0
+
+            should_upsample = not is_first
+            should_upsample_rgb = not is_last
             should_skip_layer_excite = num_skip_layers_excite > 0 and (ind + num_skip_layers_excite) < len(dim_pairs)
 
             has_self_attn = resolution in self_attn_resolutions
@@ -862,9 +865,8 @@ class Generator(BaseGenerator):
 
             self_attn = cross_attn = rgb_upsample = upsample = None
 
-            if should_upsample:
-                upsample = Upsample(dim_out)
-                rgb_upsample = Upsample(channels)
+            upsample = Upsample(dim_in) if should_upsample else None
+            rgb_upsample = Upsample(channels) if should_upsample_rgb else None
 
             if has_self_attn:
                 self_attn = SelfAttentionBlock(dim_out, dot_product = self_attn_dot_product)
@@ -897,6 +899,7 @@ class Generator(BaseGenerator):
         self.style_embed_split_dims = style_embed_split_dims
 
         self.apply(self.init_)
+        nn.init.normal_(self.init_block, std = 0.02)
 
     def init_(self, m):
         if type(m) in {nn.Conv2d, nn.Linear}:
@@ -972,6 +975,9 @@ class Generator(BaseGenerator):
 
         for squeeze_excite, (resnet_conv1, noise1, act1, resnet_conv2, noise2, act2), to_rgb_conv, self_attn, cross_attn, upsample, upsample_rgb in self.layers:
 
+            if exists(upsample):
+                x = upsample(x)
+
             if exists(squeeze_excite):
                 skip_excite = squeeze_excite(x)
                 excitations.append(skip_excite)
@@ -999,9 +1005,6 @@ class Generator(BaseGenerator):
             rgb = rgb + layer_rgb
 
             rgbs.append(rgb)
-
-            if exists(upsample):
-                x = upsample(x)
 
             if exists(upsample_rgb):
                 rgb = upsample_rgb(rgb)
