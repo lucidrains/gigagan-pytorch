@@ -789,7 +789,8 @@ class Generator(BaseGenerator):
         cross_ff_mult = 4,
         num_conv_kernels = 2,  # the number of adaptive conv kernels
         num_skip_layers_excite = 0,
-        unconditional = False
+        unconditional = False,
+        use_glu = True
     ):
         super().__init__()
         self.channels = channels
@@ -881,13 +882,16 @@ class Generator(BaseGenerator):
                 dim_skip_in, _ = dim_pairs[ind + num_skip_layers_excite]
                 skip_squeeze_excite = SqueezeExcite(dim_in, dim_skip_in)
 
+            dim_inner = dim_out * (2 if use_glu else 1)
+            activation = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
+
             resnet_block = nn.ModuleList([
-                adaptive_conv(dim_in, dim_out),
-                Noise(dim_out),
-                leaky_relu(),
-                adaptive_conv(dim_out, dim_out),
-                Noise(dim_out),
-                leaky_relu()
+                adaptive_conv(dim_in, dim_inner),
+                Noise(dim_inner),
+                activation(),
+                adaptive_conv(dim_out, dim_inner),
+                Noise(dim_inner),
+                activation()
             ])
 
             to_rgb = adaptive_conv(dim_out, channels)
