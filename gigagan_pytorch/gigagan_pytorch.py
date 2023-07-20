@@ -1635,7 +1635,9 @@ class GigaGAN(nn.Module):
         results_folder = './gigagan-results',
         sample_upsampler_dl: Optional[DataLoader] = None,
         accelerator: Optional[Accelerator] = None,
-        accelerate_kwargs: dict = {}
+        accelerate_kwargs: dict = {},
+        amp = False,
+        mixed_precision_type = 'fp16'
     ):
         super().__init__()
 
@@ -1646,7 +1648,12 @@ class GigaGAN(nn.Module):
             assert is_empty(accelerate_kwargs)
         else:
             kwargs = DistributedDataParallelKwargs(find_unused_parameters = True)
-            self.accelerator = Accelerator(kwargs_handlers = [kwargs], **accelerate_kwargs)
+
+            self.accelerator = Accelerator(
+                kwargs_handlers = [kwargs],
+                mixed_precision = mixed_precision_type if amp else 'no',
+                **accelerate_kwargs
+            )
 
         # whether to train upsampler or not
 
@@ -1675,8 +1682,15 @@ class GigaGAN(nn.Module):
 
         # use _base to designate unwrapped models
 
-        self.G_base = generator
-        self.D_base = discriminator
+        self.G = generator
+        self.D = discriminator
+
+        # ema
+
+        self.has_ema_generator = False
+
+        if self.is_main and create_ema_generator_at_init:
+            self.create_ema_generator()
 
         # print number of parameters
 
@@ -1697,24 +1711,17 @@ class GigaGAN(nn.Module):
 
         # optimizers
 
-        self.G_opt = get_optimizer(self.G_base.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
-        self.D_opt = get_optimizer(self.D_base.parameters(), lr = learning_rate * ttur_mult, betas = betas, weight_decay = weight_decay)
+        self.G_opt = get_optimizer(self.G.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
+        self.D_opt = get_optimizer(self.D.parameters(), lr = learning_rate * ttur_mult, betas = betas, weight_decay = weight_decay)
 
         # prepare for distributed
 
-        self.G, self.D, self.G_opt, self.D_opt = self.accelerator.prepare(self.G_base, self.D_base, self.G_opt, self.D_opt)
+        self.G, self.D, self.G_opt, self.D_opt = self.accelerator.prepare(self.G, self.D, self.G_opt, self.D_opt)
 
         # loss related
 
         self.discr_aux_recon_loss_weight = discr_aux_recon_loss_weight
         self.multiscale_divergence_loss_weight = multiscale_divergence_loss_weight
-
-        # ema
-
-        self.has_ema_generator = False
-
-        if self.is_main and create_ema_generator_at_init:
-            self.create_ema_generator()
 
         # steps
 
@@ -1749,8 +1756,8 @@ class GigaGAN(nn.Module):
         assert overwrite or not path.exists()
 
         pkg = dict(
-            G = self.G_base.state_dict(),
-            D = self.D_base.state_dict(),
+            G = self.unwrapped_G.state_dict(),
+            D = self.unwrapped_D.state_dict(),
             G_opt = self.G_opt.state_dict(),
             D_opt = self.D_opt.state_dict(),
             steps = self.steps.item(),
@@ -1771,8 +1778,8 @@ class GigaGAN(nn.Module):
         if 'version' in pkg and pkg['version'] != __version__:
             print(f"trying to load from version {pkg['version']}")
 
-        self.G_base.load_state_dict(pkg['G'], strict = strict)
-        self.D_base.load_state_dict(pkg['D'], strict = strict)
+        self.unwrapped_G.load_state_dict(pkg['G'], strict = strict)
+        self.unwrapped_D.load_state_dict(pkg['D'], strict = strict)
 
         if self.has_ema_generator:
             self.G_ema.load_state_dict(pkg['G_ema'])
@@ -1795,6 +1802,14 @@ class GigaGAN(nn.Module):
     @property
     def device(self):
         return self.accelerator.device
+
+    @property
+    def unwrapped_G(self):
+        return self.accelerator.unwrap_model(self.G)
+
+    @property
+    def unwrapped_D(self):
+        return self.accelerator.unwrap_model(self.D)
 
     def print(self, msg):
         self.accelerator.print(msg)
@@ -1833,8 +1848,8 @@ class GigaGAN(nn.Module):
 
         assert not self.has_ema_generator, 'EMA generator has already been created'
 
+        self.G_ema = EMA(self.unwrapped_G, update_every = update_every, update_after_step = update_after_step, beta = decay)
         self.has_ema_generator = True
-        self.G_ema = EMA(self.G, update_every = update_every, update_after_step = update_after_step, beta = decay)
 
     def generate_kwargs(self, dl_iter, batch_size):
         # what to pass into the generator
@@ -1919,78 +1934,79 @@ class GigaGAN(nn.Module):
 
             # generator
 
-            with torch.no_grad():
+            with torch.no_grad(), self.accelerator.autocast():
                 images, rgbs = self.G(
                     **G_kwargs,
                     **maybe_text_kwargs,
                     return_all_rgbs = True
                 )
 
-            # detach output of generator, as training discriminator only
+                # detach output of generator, as training discriminator only
 
-            images.detach_()
+                images.detach_()
 
-            for rgb in rgbs:
-                rgb.detach_()
+                for rgb in rgbs:
+                    rgb.detach_()
 
             # main divergence loss
 
-            fake_logits, fake_multiscale_logits, _ = self.D(
-                images,
-                rgbs,
-                **maybe_text_kwargs,
-                return_multiscale_outputs = calc_multiscale_loss,
-                calc_aux_loss = False
-            )
-
-            real_logits, real_multiscale_logits, aux_recon_losses = self.D(
-                real_images,
-                **maybe_text_kwargs,
-                return_multiscale_outputs = calc_multiscale_loss,
-                calc_aux_loss = True
-            )
-
-            divergence = discriminator_hinge_loss(real_logits, fake_logits)
-            total_divergence += (divergence.item() / grad_accum_every)
-
-            # handle multi-scale divergence
-
-            multiscale_divergence = 0.
-
-            if self.multiscale_divergence_loss_weight > 0. and len(fake_multiscale_logits) > 0:
-
-                for multiscale_fake, multiscale_real in zip(fake_multiscale_logits, real_multiscale_logits):
-                    multiscale_loss = discriminator_hinge_loss(multiscale_real, multiscale_fake)
-                    multiscale_divergence = multiscale_divergence + multiscale_loss
-
-                total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
-
-            # figure out gradient penalty if needed
-
-            gp_loss = 0.
-
-            if apply_gradient_penalty:
-                gp_loss = gradient_penalty(
-                    real_images,
-                    outputs = [real_logits, *real_multiscale_logits],
-                    grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(real_multiscale_logits)]
+            with self.accelerator.autocast():
+                fake_logits, fake_multiscale_logits, _ = self.D(
+                    images,
+                    rgbs,
+                    **maybe_text_kwargs,
+                    return_multiscale_outputs = calc_multiscale_loss,
+                    calc_aux_loss = False
                 )
 
-                total_gp_loss += (gp_loss.item() / grad_accum_every)
+                real_logits, real_multiscale_logits, aux_recon_losses = self.D(
+                    real_images,
+                    **maybe_text_kwargs,
+                    return_multiscale_outputs = calc_multiscale_loss,
+                    calc_aux_loss = True
+                )
 
-            # sum up losses
+                divergence = discriminator_hinge_loss(real_logits, fake_logits)
+                total_divergence += (divergence.item() / grad_accum_every)
 
-            total_loss = divergence + gp_loss
+                # handle multi-scale divergence
 
-            if self.multiscale_divergence_loss_weight > 0.:
-                total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
+                multiscale_divergence = 0.
 
-            if self.discr_aux_recon_loss_weight > 0.:
-                aux_loss = sum(aux_recon_losses)
+                if self.multiscale_divergence_loss_weight > 0. and len(fake_multiscale_logits) > 0:
 
-                total_aux_loss += (aux_loss.item() / grad_accum_every)
+                    for multiscale_fake, multiscale_real in zip(fake_multiscale_logits, real_multiscale_logits):
+                        multiscale_loss = discriminator_hinge_loss(multiscale_real, multiscale_fake)
+                        multiscale_divergence = multiscale_divergence + multiscale_loss
 
-                total_loss = total_loss + aux_loss * self.discr_aux_recon_loss_weight
+                    total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
+
+                # figure out gradient penalty if needed
+
+                gp_loss = 0.
+
+                if apply_gradient_penalty:
+                    gp_loss = gradient_penalty(
+                        real_images,
+                        outputs = [real_logits, *real_multiscale_logits],
+                        grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(real_multiscale_logits)]
+                    )
+
+                    total_gp_loss += (gp_loss.item() / grad_accum_every)
+
+                # sum up losses
+
+                total_loss = divergence + gp_loss
+
+                if self.multiscale_divergence_loss_weight > 0.:
+                    total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
+
+                if self.discr_aux_recon_loss_weight > 0.:
+                    aux_loss = sum(aux_recon_losses)
+
+                    total_aux_loss += (aux_loss.item() / grad_accum_every)
+
+                    total_loss = total_loss + aux_loss * self.discr_aux_recon_loss_weight
 
             # backwards
 
@@ -2022,39 +2038,40 @@ class GigaGAN(nn.Module):
             
             G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
 
-            image, rgbs = self.G(
-                **G_kwargs,
-                **maybe_text_kwargs,
-                return_all_rgbs = True
-            )
+            with self.accelerator.autocast():
+                image, rgbs = self.G(
+                    **G_kwargs,
+                    **maybe_text_kwargs,
+                    return_all_rgbs = True
+                )
 
-            # discriminator
+                # discriminator
 
-            logits, multiscale_logits, _ = self.D(
-                image,
-                rgbs,
-                **maybe_text_kwargs,
-                return_multiscale_outputs = calc_multiscale_loss,
-                calc_aux_loss = False
-            )
+                logits, multiscale_logits, _ = self.D(
+                    image,
+                    rgbs,
+                    **maybe_text_kwargs,
+                    return_multiscale_outputs = calc_multiscale_loss,
+                    calc_aux_loss = False
+                )
 
-            # hinge loss
+                # hinge loss
 
-            divergence = generator_hinge_loss(logits)
+                divergence = generator_hinge_loss(logits)
 
-            total_divergence += (divergence.item() / grad_accum_every)
+                total_divergence += (divergence.item() / grad_accum_every)
 
-            total_loss = divergence
+                total_loss = divergence
 
-            if self.multiscale_divergence_loss_weight > 0. and len(multiscale_logits) > 0:
-                multiscale_divergence = 0.
+                if self.multiscale_divergence_loss_weight > 0. and len(multiscale_logits) > 0:
+                    multiscale_divergence = 0.
 
-                for multiscale_logit in multiscale_logits:
-                    multiscale_divergence = multiscale_divergence + generator_hinge_loss(multiscale_logit)
+                    for multiscale_logit in multiscale_logits:
+                        multiscale_divergence = multiscale_divergence + generator_hinge_loss(multiscale_logit)
 
-                total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
+                    total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
 
-                total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
+                    total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
 
             self.accelerator.backward(total_loss / grad_accum_every)
 
@@ -2070,7 +2087,8 @@ class GigaGAN(nn.Module):
     def sample_lambda(self, dl_iter, batch_size):
         G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
 
-        generator_output = self.G(**G_kwargs, **maybe_text_kwargs)
+        with self.accelerator.autocast():
+            generator_output = self.G(**G_kwargs, **maybe_text_kwargs)
 
         if not self.train_upsampler:
             return generator_output
@@ -2117,7 +2135,7 @@ class GigaGAN(nn.Module):
 
         # Possible to do: Include some metric to save if improved, include some sampler dict text entries
         self.save(str(self.model_folder / f'model-{milestone}.ckpt'))
-        
+
     @beartype
     def forward(
         self,
