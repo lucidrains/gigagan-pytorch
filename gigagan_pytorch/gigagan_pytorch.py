@@ -1500,24 +1500,24 @@ class Discriminator(nn.Module):
             has_multiscale_input = resolution in self.multiscale_input_resolutions
 
             if has_multiscale_input:
-                images_to_concat = rgbs_index.get(resolution, None)
+                rgb = rgbs_index.get(resolution, None)
 
                 # if no rgbs passed in, assume all real images, and just resize, though realistically you would concat fake and real images together using helper function `create_real_fake_rgbs` function
 
-                if not exists(images_to_concat):
-                    images_to_concat = self.resize_image_to(images, resolution)
+                if not exists(rgb):
+                    rgb = self.resize_image_to(images, resolution)
 
                 # multi-scale input features
 
-                multi_scale_input_feats = from_rgb(images_to_concat)
+                multi_scale_input_feats = from_rgb(rgb)
 
                 # expand multi-scale input features, as could include extra scales from previous stage
 
-                multi_scale_input_feats = repeat(multi_scale_input_feats, 'b ... -> (s b) ...', s = x.shape[0] // images_to_concat.shape[0])
+                multi_scale_input_feats = repeat(multi_scale_input_feats, 'b ... -> (s b) ...', s = x.shape[0] // rgb.shape[0])
 
                 # add the multi-scale input features to the current hidden state from main stem
 
-                images_to_concat = x + multi_scale_input_feats
+                x = x + multi_scale_input_feats
 
                 # and also concat for scale invariance
 
