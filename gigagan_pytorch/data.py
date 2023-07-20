@@ -80,9 +80,20 @@ class ImageDataset(Dataset):
         return len(self.paths)
 
     def __getitem__(self, index):
-        path = self.paths[index]
-        img = Image.open(path)
-        return self.transform(img)
+        err = True
+        while err:
+            try:
+                path = self.paths[index]
+                img = Image.open(path)
+                img = self.transform(img)
+                err = False
+            except:
+                print("Error with image", str(path))
+                if not index==len(self.paths):
+                    index+=1
+                else:
+                    index =0
+        return img
 
 class TextImageDataset(Dataset):
     def __init__(self):
