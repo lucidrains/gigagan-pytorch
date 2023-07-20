@@ -1668,7 +1668,7 @@ class GigaGAN(nn.Module):
         sample_upsampler_dl: Optional[DataLoader] = None,
         accelerator: Optional[Accelerator] = None,
         accelerate_kwargs: dict = {},
-        find_unused_parameters = False,
+        find_unused_parameters = True,
         amp = False,
         mixed_precision_type = 'fp16'
     ):
