@@ -109,6 +109,9 @@ def gradient_penalty(
     if not isinstance(outputs, (list, tuple)):
         outputs = [outputs]
 
+    if exists(scaler):
+        outputs = [*map(scaler.scale, outputs)]
+
     if not exists(grad_output_weights):
         grad_output_weights = (1,) * len(outputs)
 
