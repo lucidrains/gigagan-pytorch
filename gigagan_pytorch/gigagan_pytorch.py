@@ -1461,25 +1461,7 @@ class Discriminator(nn.Module):
         image_size = (self.image_size, self.image_size)
         assert x.shape[-2:] == image_size
 
-        # if real images are passed in, assume `images` are generated, and take care of all the multi-resolution input. this can also be done externally, in which case `real_images` will not be populated
-
-        has_real_images = exists(real_images)
-
-        if has_real_images:
-            assert real_images.shape[-2:] == image_size, f'images from dataloader must be of size {image_size} but received something else'
-
-            num_fake_images = x.shape[0]
-            num_real_images = real_images.shape[0]
-
-            split_batch_size = (num_fake_images, num_real_images)
-            x = torch.cat((x, real_images), dim = 0)
-
         batch = x.shape[0]
-
-        assert not (has_real_images and not exists(rgbs)) 
-
-        if has_real_images:
-            rgbs = [torch.cat((rgb, self.resize_image_to(real_images, rgb.shape[-1])), dim = 0) for rgb in rgbs]
 
         # index the rgbs by resolution
 
@@ -1563,11 +1545,7 @@ class Discriminator(nn.Module):
                 recon_output = x[:batch_prev_stage]
                 recon_output = rearrange(x, '(s b) ... -> s b ...', b = batch)
 
-                if has_real_images:
-                    _, recon_output = recon_output.split(split_batch_size, dim = 1)
-                    aux_recon_target = real_images
-                else:
-                    aux_recon_target = images
+                aux_recon_target = images
 
                 # only use the input real images for aux recon
 
@@ -1582,21 +1560,7 @@ class Discriminator(nn.Module):
         logits = self.to_logits(x)   
         logits = rearrange(logits, '(s b) ... -> s b ...', b = batch)
 
-        if not has_real_images:
-            return logits, multiscale_outputs, aux_recon_losses
-
-        # if real images are present, break up the outputs into (fake, real) tuples
-
-        split_logits = logits.split(split_batch_size, dim = 1)
-
-        split_multiscale_outputs = []
-
-        for multiscale_output in multiscale_outputs:
-            multiscale_output = rearrange(multiscale_output, '(s b) ... -> s b ...', b = batch)
-            multiscale_output = multiscale_output.split(split_batch_size, dim = 1)
-            split_multiscale_outputs.append(multiscale_output)
-
-        return split_logits, split_multiscale_outputs, aux_recon_losses
+        return logits, multiscale_outputs, aux_recon_losses
 
 # gan
 
@@ -1887,12 +1851,19 @@ class GigaGAN(nn.Module):
 
             # main divergence loss
 
-            (fake_logits, real_logits), multiscale_logits, aux_recon_losses = self.D(
+            fake_logits, fake_multiscale_logits, _ = self.D(
                 images,
                 rgbs,
                 **maybe_text_kwargs,
-                real_images = real_images,
-                return_multiscale_outputs = calc_multiscale_loss
+                return_multiscale_outputs = calc_multiscale_loss,
+                calc_aux_loss = False
+            )
+
+            real_logits, real_multiscale_logits, aux_recon_losses = self.D(
+                real_images,
+                **maybe_text_kwargs,
+                return_multiscale_outputs = calc_multiscale_loss,
+                calc_aux_loss = True
             )
 
             divergence = discriminator_hinge_loss(real_logits, fake_logits)
@@ -1902,14 +1873,11 @@ class GigaGAN(nn.Module):
 
             multiscale_divergence = 0.
 
-            multiscale_real_logits = []
+            if self.multiscale_divergence_loss_weight > 0. and len(fake_multiscale_logits) > 0:
 
-            if self.multiscale_divergence_loss_weight > 0. and len(multiscale_logits) > 0:
-
-                for multiscale_fake, multiscale_real in multiscale_logits:
+                for multiscale_fake, multiscale_real in zip(fake_multiscale_logits, real_multiscale_logits):
                     multiscale_loss = discriminator_hinge_loss(multiscale_real, multiscale_fake)
                     multiscale_divergence = multiscale_divergence + multiscale_loss
-                    multiscale_real_logits.append(multiscale_real)
 
                 total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
 
@@ -1920,8 +1888,8 @@ class GigaGAN(nn.Module):
             if apply_gradient_penalty:
                 gp_loss = gradient_penalty(
                     real_images,
-                    outputs = [real_logits, *multiscale_real_logits],
-                    grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(multiscale_real_logits)]
+                    outputs = [real_logits, *real_multiscale_logits],
+                    grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(real_multiscale_logits)]
                 )
 
                 total_gp_loss += (gp_loss.item() / grad_accum_every)
