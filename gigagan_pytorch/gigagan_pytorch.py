@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch import nn, einsum, Tensor
 from torch.autograd import grad as torch_grad
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler
 
 from beartype import beartype
 from beartype.typing import List, Optional, Tuple, Dict, Union, Iterable
@@ -102,7 +103,8 @@ def gradient_penalty(
     images,
     outputs,
     grad_output_weights = None,
-    weight = 10
+    weight = 10,
+    scaler: Optional[GradScaler] = None
 ):
     if not isinstance(outputs, (list, tuple)):
         outputs = [outputs]
@@ -110,7 +112,7 @@ def gradient_penalty(
     if not exists(grad_output_weights):
         grad_output_weights = (1,) * len(outputs)
 
-    gradients, *_ = torch_grad(
+    maybe_scaled_gradients, *_ = torch_grad(
         outputs = outputs,
         inputs = images,
         grad_outputs = [(torch.ones_like(output) * weight) for output, weight in zip(outputs, grad_output_weights)],
@@ -118,6 +120,13 @@ def gradient_penalty(
         retain_graph = True,
         only_inputs = True
     )
+
+    gradients = maybe_scaled_gradients
+
+    if exists(scaler):
+        scale = scaler.get_scale()
+        inv_scale = 1. / max(scale, 1e-5)
+        gradients = maybe_scaled_gradients * inv_scale
 
     gradients = rearrange(gradients, 'b ... -> b (...)')
     return weight * ((gradients.norm(2, dim = 1) - 1) ** 2).mean()
@@ -1764,6 +1773,12 @@ class GigaGAN(nn.Module):
             version = __version__
         )
 
+        if exists(self.G_opt.scaler):
+            pkg['G_scaler'] = self.G_opt.scaler.state_dict()
+
+        if exists(self.D_opt.scaler):
+            pkg['D_scaler'] = self.D_opt.scaler.state_dict()
+
         if self.has_ema_generator:
             pkg['G_ema'] = self.G_ema.state_dict()
 
@@ -1793,6 +1808,13 @@ class GigaGAN(nn.Module):
         try:
             self.G_opt.load_state_dict(pkg['G_opt'])
             self.D_opt.load_state_dict(pkg['D_opt'])
+
+            if 'G_scaler' in pkg and exists(self.G_opt.scaler):
+                self.G_opt.scaler.load_state_dict(pkg['G_scaler'])
+
+            if 'D_scaler' in pkg and exists(self.D_opt.scaler):
+                self.D_opt.scaler.load_state_dict(pkg['D_scaler'])
+
         except Exception as e:
             self.print(f'unable to load optimizers {e.msg}- optimizer states will be reset')
             pass
@@ -1989,7 +2011,8 @@ class GigaGAN(nn.Module):
                     gp_loss = gradient_penalty(
                         real_images,
                         outputs = [real_logits, *real_multiscale_logits],
-                        grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(real_multiscale_logits)]
+                        grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(real_multiscale_logits)],
+                        scaler = self.D_opt.scaler
                     )
 
                     total_gp_loss += (gp_loss.item() / grad_accum_every)

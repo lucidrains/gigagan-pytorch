@@ -72,11 +72,14 @@ dataset = ImageDataset(
 
 dataloader = dataset.get_dataloader(batch_size = 1)
 
+# you must then set the dataloader for the GAN before training
+
+gan.set_dataloader(dataloader)
+
 # training the discriminator and generator alternating
 # for 100 steps in this example, batch size 1, gradient accumulated 8 times
 
 gan(
-    dataloader = dataloader,
     steps = 100,
     grad_accum_every = 8
 )
@@ -116,11 +119,12 @@ dataset = ImageDataset(
 
 dataloader = dataset.get_dataloader(batch_size = 1)
 
+gan.set_dataloader(dataloader)
+
 # training the discriminator and generator alternating
 # for 100 steps in this example, batch size 1, gradient accumulated 8 times
 
 gan(
-    dataloader = dataloader,
     steps = 100,
     grad_accum_every = 8
 )
@@ -162,7 +166,7 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0`
 
 - [ ] add accelerate
     - [x] works single machine
-    - [ ] works for mixed precision (make sure gradient penalty is scaled correctly), take care of manual scaler saving and reloading, borrow from imagen-pytorch
+    - [x] works for mixed precision (make sure gradient penalty is scaled correctly), take care of manual scaler saving and reloading, borrow from imagen-pytorch
     - [ ] make sure it works multi-GPU for one machine
     - [ ] have someone else try multiple machines
 
