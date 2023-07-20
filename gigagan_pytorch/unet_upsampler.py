@@ -305,13 +305,14 @@ class UnetUpsampler(BaseGenerator):
         full_attn = (False, False, False, True),
         cross_attn = (False, False, False, True),
         flash_attn = True,
-        attn_dim_head = 64,
-        attn_heads = 8,
+        self_attn_dim_head = 64,
+        self_attn_heads = 8,
+        self_attn_dot_product = True,
+        self_attn_ff_mult = 4,
         attn_depths = (1, 1, 1, 1),
         cross_attn_dim_head = 64,
         cross_attn_heads = 8,
         cross_ff_mult = 4,
-        ff_mult = 4,
         mid_attn_depth = 1,
         num_conv_kernels = 2,
         resize_mode = 'bilinear',
@@ -399,13 +400,13 @@ class UnetUpsampler(BaseGenerator):
             self.downs.append(nn.ModuleList([
                 block_klass(dim_in, dim_in),
                 block_klass(dim_in, dim_in),
-                CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = attn_dim_head, heads = attn_heads, ff_mult = ff_mult) if has_cross_attn else None,
-                attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads, depth = layer_attn_depth),
+                CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = self_attn_ff_mult) if has_cross_attn else None,
+                attn_klass(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
                 Downsample(dim_in, dim_out) if not should_not_downsample else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
             ]))
 
         self.mid_block1 = block_klass(mid_dim, mid_dim)
-        self.mid_attn = FullAttention(mid_dim, dim_head = attn_dim_head, heads = attn_heads, depth = mid_attn_depth)
+        self.mid_attn = FullAttention(mid_dim, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = mid_attn_depth)
         self.mid_block2 = block_klass(mid_dim, mid_dim)
         self.mid_to_rgb = nn.Conv2d(mid_dim, channels, 1)
 
@@ -420,8 +421,8 @@ class UnetUpsampler(BaseGenerator):
                 nn.Conv2d(dim_in, channels, 1),
                 block_klass(dim_in * 2, dim_in),
                 block_klass(dim_in * 2, dim_in),
-                CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = attn_dim_head, heads = attn_heads, ff_mult = ff_mult) if has_cross_attn else None,
-                attn_klass(dim_in, dim_head = attn_dim_head, heads = attn_heads, depth = layer_attn_depth),
+                CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = cross_ff_mult) if has_cross_attn else None,
+                attn_klass(dim_in, dim_head = cross_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
             ]))
 
         self.out_dim = default(out_dim, channels)
