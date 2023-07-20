@@ -1235,6 +1235,8 @@ class Predictor(nn.Module):
         super().__init__()
         self.unconditional = unconditional
         self.residual_fn = nn.Conv2d(dim, dim, 1)
+        self.residual_scale = 2 ** -0.5
+
         self.layers = nn.ModuleList([])
 
         klass = nn.Conv2d if unconditional else partial(AdaptiveConv2DMod, num_conv_kernels = num_conv_kernels)
@@ -1273,6 +1275,7 @@ class Predictor(nn.Module):
             x = activation(x)
 
             x = x + inner_residual
+            x = x * self.residual_scale
 
         x = x + residual
         return self.to_logits(x)
@@ -1640,7 +1643,7 @@ class GigaGAN(nn.Module):
         learning_rate = 2e-4,
         betas = (0.5, 0.9),
         weight_decay = 0.,
-        discr_aux_recon_loss_weight = 0.25,
+        discr_aux_recon_loss_weight = 1.,
         multiscale_divergence_loss_weight = 0.1,
         calc_multiscale_loss_every = 1,
         apply_gradient_penalty_every = 4,
@@ -2115,12 +2118,14 @@ class GigaGAN(nn.Module):
 
         # update exponentially moving averaged generator
 
-        if self.has_ema_generator:
+        self.accelerator.wait_for_everyone()
+
+        if self.is_main and self.has_ema_generator:
             self.G_ema.update()
 
         return TrainGenLosses(total_divergence, total_multiscale_divergence)
 
-    def sample_lambda(self, dl_iter, batch_size):
+    def sample(self, dl_iter, batch_size):
         G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
 
         with self.accelerator.autocast():
@@ -2158,7 +2163,7 @@ class GigaGAN(nn.Module):
         for model, filename in sample_models_and_output_file_name:
             model.eval()
 
-            all_images_list = list(map(lambda n: self.sample_lambda(dl_iter, n), batches))
+            all_images_list = list(map(lambda n: self.sample(dl_iter, n), batches))
             all_images = torch.cat(all_images_list, dim=0)
 
             all_images.clamp_(0., 1.)
