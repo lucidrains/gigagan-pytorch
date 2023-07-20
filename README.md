@@ -2,7 +2,7 @@
 
 <img src="./gigagan-architecture.png" width="500px"></img>
 
-## GigaGAN - Pytorch (wip)
+## GigaGAN - Pytorch
 
 Implementation of <a href="https://arxiv.org/abs/2303.05511v2">GigaGAN</a> <a href="https://mingukkang.github.io/GigaGAN/">(project page)</a>, new SOTA GAN out of Adobe.
 

@@ -13,7 +13,7 @@ def get_optimizer(
     wd = 1e-2,
     betas = (0.9, 0.99),
     eps = 1e-8,
-    filter_by_requires_grad = False,
+    filter_by_requires_grad = True,
     group_wd_params = True,
     **kwargs
 ):

@@ -77,6 +77,14 @@ def num_to_groups(num, divisor):
 def mkdir_if_not_exists(path):
     path.mkdir(exist_ok = True, parents = True)
 
+@beartype
+def set_requires_grad_(
+    m: nn.Module,
+    requires_grad: bool
+):
+    for p in m.parameters():
+        p.requires_grad = requires_grad
+
 # activation functions
 
 def leaky_relu(neg_slope = 0.1):
@@ -624,6 +632,8 @@ class TextEncoder(nn.Module):
             clip = OpenClipAdapter()
 
         self.clip = clip
+        set_requires_grad_(clip, False)
+
         self.learned_global_token = nn.Parameter(torch.randn(dim))
 
         self.project_in = nn.Linear(clip.dim_latent, dim) if clip.dim_latent != dim else nn.Identity()
@@ -1211,12 +1221,13 @@ class Predictor(nn.Module):
         self.layers = nn.ModuleList([])
 
         klass = nn.Conv2d if unconditional else partial(AdaptiveConv2DMod, num_conv_kernels = num_conv_kernels)
+        klass_kwargs = dict(padding = 1) if unconditional else dict()
 
         for ind in range(depth):
             self.layers.append(nn.ModuleList([
-                klass(dim, dim, 3, padding = 1),
+                klass(dim, dim, 3, **klass_kwargs),
                 leaky_relu(),
-                klass(dim, dim, 3, padding = 1),
+                klass(dim, dim, 3, **klass_kwargs),
                 leaky_relu()
             ]))
 
@@ -1662,8 +1673,10 @@ class GigaGAN(nn.Module):
 
         assert isinstance(generator, generator_klass)
 
-        self.G = generator
-        self.D = discriminator
+        # use _base to designate unwrapped models
+
+        self.G_base = generator
+        self.D_base = discriminator
 
         # print number of parameters
 
@@ -1684,12 +1697,12 @@ class GigaGAN(nn.Module):
 
         # optimizers
 
-        self.G_opt = get_optimizer(self.G.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
-        self.D_opt = get_optimizer(self.D.parameters(), lr = learning_rate * ttur_mult, betas = betas, weight_decay = weight_decay)
+        self.G_opt = get_optimizer(self.G_base.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
+        self.D_opt = get_optimizer(self.D_base.parameters(), lr = learning_rate * ttur_mult, betas = betas, weight_decay = weight_decay)
 
         # prepare for distributed
 
-        self.G, self.D, self.G_opt, self.D_opt = self.accelerator.prepare(self.G, self.D, self.G_opt, self.D_opt)
+        self.G, self.D, self.G_opt, self.D_opt = self.accelerator.prepare(self.G_base, self.D_base, self.G_opt, self.D_opt)
 
         # loss related
 
@@ -1736,8 +1749,8 @@ class GigaGAN(nn.Module):
         assert overwrite or not path.exists()
 
         pkg = dict(
-            G = self.G.state_dict(),
-            D = self.D.state_dict(),
+            G = self.G_base.state_dict(),
+            D = self.D_base.state_dict(),
             G_opt = self.G_opt.state_dict(),
             D_opt = self.D_opt.state_dict(),
             steps = self.steps.item(),
@@ -1758,8 +1771,8 @@ class GigaGAN(nn.Module):
         if 'version' in pkg and pkg['version'] != __version__:
             print(f"trying to load from version {pkg['version']}")
 
-        self.G.load_state_dict(pkg['G'], strict = strict)
-        self.D.load_state_dict(pkg['D'], strict = strict)
+        self.G_base.load_state_dict(pkg['G'], strict = strict)
+        self.D_base.load_state_dict(pkg['D'], strict = strict)
 
         if self.has_ema_generator:
             self.G_ema.load_state_dict(pkg['G_ema'])
