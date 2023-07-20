@@ -192,6 +192,7 @@ $ accelerate launch train.py
     - [x] make sure it works multi-GPU for one machine
     - [ ] have someone else try multiple machines
 
+- [ ] clip should be optional for all modules, and managed by `GigaGAN`, with text -> text embeds processed once
 - [ ] add ability to select a random subset from multiscale dimension, for efficiency
 
 - [ ] add some differentiable augmentations, proven technique from the old GAN days

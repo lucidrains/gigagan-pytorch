@@ -1192,12 +1192,20 @@ class VisionAidedDiscriminator(nn.Module):
             *self.to_pred.parameters()
         ]
 
+    @beartype
     def forward(
         self,
         images,
-        text_embeds = None
+        texts: Optional[List[str]] = None,
+        text_embeds: Optional[Tensor] = None
     ):
+        assert self.unconditional or (exists(text_embeds) ^ exists(texts))
+
         with torch.no_grad():
+            if not self.unconditional and exists(texts):
+                self.clip.eval()
+                text_embeds = self.clip.embed_texts
+
             self.clip.eval()
             _, image_encodings = self.clip.embed_images(images)
             image_encodings = image_encodings.detach()
