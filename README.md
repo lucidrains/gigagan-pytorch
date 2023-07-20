@@ -178,6 +178,10 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0`
 
 - [ ] add ability to select a random subset from multiscale dimension, for efficiency
 
+- [ ] add some differentiable augmentations, proven technique from the old GAN days
+    - [ ] remove any magic being done with automatic rgbs processing, and have it explicitly passed in - offer functions on the discriminator that can process real images into the right multi-scales
+    - [ ] add horizontal flip for starters
+
 - [ ] do a review of the auxiliary losses
     - [ ] add vision aided loss and make sure it trains, inspect output
 
