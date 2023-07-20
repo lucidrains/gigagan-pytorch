@@ -24,6 +24,12 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 
 - <a href="https://github.com/CerebralSeed">@CerebralSeed</a> for pull requesting the initial sampling code for both the generator and upsampler!
 
+## Install
+
+```bash
+$ pip install gigagan-pytorch
+```
+
 ## Usage
 
 Simple unconditional GAN, for starters
