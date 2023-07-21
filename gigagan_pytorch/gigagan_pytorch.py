@@ -18,6 +18,8 @@ from beartype.typing import List, Optional, Tuple, Dict, Union, Iterable
 from einops import rearrange, pack, unpack, repeat, reduce
 from einops.layers.torch import Rearrange, Reduce
 
+from kornia.filters import filter2d
+
 from ema_pytorch import EMA
 
 from gigagan_pytorch.version import __version__
@@ -185,7 +187,24 @@ class RMSNorm(nn.Module):
 
 # down and upsample
 
-class Upsample(nn.Module):
+class Blur(nn.Module):
+    def __init__(self):
+        super().__init__()
+        f = torch.Tensor([1, 2, 1])
+        self.register_buffer('f', f)
+
+    def forward(self, x):
+        f = self.f
+        f = f[None, None, :] * f [None, :, None]
+        return filter2d(x, f, normalized = True)
+
+def Upsample(dim):
+    return nn.Sequential(
+        nn.Upsample(scale_factor = 2, mode = 'bilinear', align_corners = False),
+        Blur()
+    )
+
+class PixelShuffleUpsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
         conv = nn.Conv2d(dim, dim * 4, 1)
@@ -770,8 +789,8 @@ class Generator(BaseGenerator):
     def __init__(
         self,
         *,
-        dim_capacity = 16,
         image_size,
+        dim_capacity = 16,
         dim_max = 2048,
         channels = 3,
         style_network: Optional[Union[StyleNetwork, Dict]] = None,
@@ -790,7 +809,8 @@ class Generator(BaseGenerator):
         num_conv_kernels = 2,  # the number of adaptive conv kernels
         num_skip_layers_excite = 0,
         unconditional = False,
-        use_glu = True
+        use_glu = True,
+        pixel_shuffle_upsample = False
     ):
         super().__init__()
         self.channels = channels
@@ -898,8 +918,10 @@ class Generator(BaseGenerator):
 
             self_attn = cross_attn = rgb_upsample = upsample = None
 
-            upsample = Upsample(dim_in) if should_upsample else None
-            rgb_upsample = Upsample(channels) if should_upsample_rgb else None
+            upsample_klass = Upsample if not pixel_shuffle_upsample else PixelShuffleUpsample
+
+            upsample = upsample_klass(dim_in) if should_upsample else None
+            rgb_upsample = upsample_klass(channels) if should_upsample_rgb else None
 
             if has_self_attn:
                 self_attn = SelfAttentionBlock(
