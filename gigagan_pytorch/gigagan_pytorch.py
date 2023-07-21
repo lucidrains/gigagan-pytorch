@@ -198,7 +198,7 @@ class Blur(nn.Module):
         f = f[None, None, :] * f [None, :, None]
         return filter2d(x, f, normalized = True)
 
-def Upsample(dim):
+def Upsample(*args):
     return nn.Sequential(
         nn.Upsample(scale_factor = 2, mode = 'bilinear', align_corners = False),
         Blur()

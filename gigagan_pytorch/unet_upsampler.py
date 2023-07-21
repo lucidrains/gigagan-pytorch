@@ -14,7 +14,8 @@ from gigagan_pytorch.gigagan_pytorch import (
     StyleNetwork,
     AdaptiveConv2DMod,
     TextEncoder,
-    CrossAttentionBlock
+    CrossAttentionBlock,
+    Upsample
 )
 
 from beartype import beartype
@@ -47,7 +48,7 @@ def null_iterator():
 
 # small helper modules
 
-class Upsample(nn.Module):
+class PixelShuffleUpsample(nn.Module):
     def __init__(self, dim, dim_out = None):
         super().__init__()
         dim_out = default(dim_out, dim)
@@ -299,6 +300,7 @@ class UnetUpsampler(BaseGenerator):
         out_dim = None,
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         style_network: Optional[Union[StyleNetwork, Dict]] = None,
+        style_network_dim = None,
         dim_mults = (1, 2, 4, 8),
         channels = 3,
         resnet_block_groups = 8,
@@ -331,6 +333,8 @@ class UnetUpsampler(BaseGenerator):
             style_network = StyleNetwork(**style_network)
 
         self.style_network = style_network
+
+        assert exists(style_network) ^ exists(style_network_dim), 'either style_network or style_network_dim must be passed in'
 
         # validate text conditioning and style network hparams
 
@@ -416,8 +420,8 @@ class UnetUpsampler(BaseGenerator):
             has_cross_attn = not self.unconditional and layer_cross_attn
 
             self.ups.append(nn.ModuleList([
-                Upsample(dim_out, dim_in),
-                Upsample(channels),
+                PixelShuffleUpsample(dim_out, dim_in),
+                Upsample(),
                 nn.Conv2d(dim_in, channels, 1),
                 block_klass(dim_in * 2, dim_in),
                 block_klass(dim_in * 2, dim_in),
