@@ -14,8 +14,8 @@ def exists(val):
 def l2norm(t):
     return F.normalize(t, dim = -1)
 
-@beartype
 class OpenClipAdapter(nn.Module):
+    @beartype
     def __init__(
         self,
         name = 'ViT-B/32',
@@ -100,6 +100,7 @@ class OpenClipAdapter(nn.Module):
     def max_text_len(self):
         return self.clip.positional_embedding.shape[0]
 
+    @beartype
     def embed_texts(
         self,
         texts: List[str]
@@ -133,6 +134,7 @@ class OpenClipAdapter(nn.Module):
 
         return l2norm(image_embeds.float()), image_encodings.float()
 
+    @beartype
     def contrastive_loss(
         self,
         images,

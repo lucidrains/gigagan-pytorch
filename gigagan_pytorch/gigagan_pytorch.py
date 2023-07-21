@@ -157,7 +157,7 @@ def aux_clip_loss(
     assert exists(texts) ^ exists(text_embeds)
 
     if exists(texts):
-        text_embeds = clip.embed_texts(texts)
+        text_embeds, _ = clip.embed_texts(texts)
 
     return clip.contrastive_loss(images = images, text_embeds = text_embeds)
 
@@ -1660,7 +1660,8 @@ TrainDiscrLosses = namedtuple('TrainDiscrLosses', [
 
 TrainGenLosses = namedtuple('TrainGenLosses', [
     'divergence',
-    'multiscale_divergence'
+    'multiscale_divergence',
+    'contrastive_loss'
 ])
 
 class GigaGAN(nn.Module):
@@ -1676,6 +1677,8 @@ class GigaGAN(nn.Module):
         weight_decay = 0.,
         discr_aux_recon_loss_weight = 1.,
         multiscale_divergence_loss_weight = 0.1,
+        vision_aided_divergence_loss_weight = 0.5,
+        generator_contrastive_loss_weight = 0.1,
         calc_multiscale_loss_every = 1,
         apply_gradient_penalty_every = 4,
         ttur_mult = 1,
@@ -1789,6 +1792,8 @@ class GigaGAN(nn.Module):
 
         self.discr_aux_recon_loss_weight = discr_aux_recon_loss_weight
         self.multiscale_divergence_loss_weight = multiscale_divergence_loss_weight
+        self.vision_aided_divergence_loss_weight = vision_aided_divergence_loss_weight
+        self.generator_contrastive_loss_weight = generator_contrastive_loss_weight
 
         # steps
 
@@ -1966,7 +1971,7 @@ class GigaGAN(nn.Module):
                 assert isinstance(result, tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
                 real_images, texts = result
 
-                maybe_text_kwargs['texts'] = texts
+                maybe_text_kwargs['texts'] = texts[:batch_size]
 
             real_images = real_images.to(self.device)
 
@@ -2124,14 +2129,20 @@ class GigaGAN(nn.Module):
         grad_accum_every = 1,
         calc_multiscale_loss = True
     ):
+        need_contrastive_loss = self.generator_contrastive_loss_weight > 0. and not self.unconditional
+
         total_divergence = 0.
         total_multiscale_divergence = 0. if calc_multiscale_loss else None
+        contrastive_loss = 0.
 
         self.G.train()
         self.D.train()
 
         self.D_opt.zero_grad()
         self.G_opt.zero_grad()
+
+        all_images = []
+        all_texts = []
 
         for _ in range(grad_accum_every):
 
@@ -2145,6 +2156,12 @@ class GigaGAN(nn.Module):
                     **maybe_text_kwargs,
                     return_all_rgbs = True
                 )
+
+                # accumulate all images and texts for maybe contrastive loss
+
+                if need_contrastive_loss:
+                    all_images.append(image)
+                    all_texts.extend(maybe_text_kwargs['texts'])
 
                 # discriminator
 
@@ -2174,7 +2191,23 @@ class GigaGAN(nn.Module):
 
                     total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
 
-            self.accelerator.backward(total_loss / grad_accum_every)
+            self.accelerator.backward(total_loss / grad_accum_every, retain_graph = need_contrastive_loss)
+
+        # if needs the generator contrastive loss
+        # gather up all images and texts and calculate it
+
+        if need_contrastive_loss:
+            all_images = torch.cat(all_images, dim = 0)
+
+            contrastive_loss = aux_clip_loss(
+                clip = self.G.text_encoder.clip,
+                texts = all_texts,
+                images = all_images
+            )
+
+            self.accelerator.backward(contrastive_loss * self.generator_contrastive_loss_weight)
+
+        # generator optimizer step
 
         self.G_opt.step()
 
@@ -2185,7 +2218,7 @@ class GigaGAN(nn.Module):
         if self.is_main and self.has_ema_generator:
             self.G_ema.update()
 
-        return TrainGenLosses(total_divergence, total_multiscale_divergence)
+        return TrainGenLosses(total_divergence, total_multiscale_divergence, contrastive_loss)
 
     def sample(self, dl_iter, batch_size):
         G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
@@ -2271,7 +2304,7 @@ class GigaGAN(nn.Module):
 
             self.accelerator.wait_for_everyone()
 
-            g_loss, multiscale_g_loss = self.train_generator_step(
+            g_loss, multiscale_g_loss, contrastive_loss = self.train_generator_step(
                 dl_iter = dl_iter,
                 batch_size = batch_size,
                 grad_accum_every = grad_accum_every,
@@ -2288,7 +2321,7 @@ class GigaGAN(nn.Module):
                 last_multiscale_g_loss = multiscale_g_loss
 
             if is_first_step or divisible_by(steps, self.log_steps_every):
-                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f}')
+                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f} | CL: {contrastive_loss:.2f}')
 
             self.accelerator.wait_for_everyone()
 
