@@ -143,6 +143,9 @@ gan(
 * `MSD` - Multiscale Discriminator
 * `GP` - Gradient Penalty
 * `SSL` - Auxiliary Reconstruction in Discriminator (from Lightweight GAN)
+* `VD` - Vision-aided Discriminator
+* `VG` - Vision-aided Generator
+* `CL` - Generator Constrastive Loss
 
 A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0` to `10`, and usually staying pretty constant. If at any time after 1k training steps these values persist at triple digits, that would mean something is wrong. It is ok for generator and discriminator values to occasionally dip negative, but it should swing back up to the range above.
 

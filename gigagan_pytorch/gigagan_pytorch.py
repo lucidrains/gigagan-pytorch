@@ -1686,6 +1686,7 @@ TrainDiscrLosses = namedtuple('TrainDiscrLosses', [
 TrainGenLosses = namedtuple('TrainGenLosses', [
     'divergence',
     'multiscale_divergence',
+    'total_vd_divergence',
     'contrastive_loss'
 ])
 
@@ -2182,6 +2183,7 @@ class GigaGAN(nn.Module):
 
         total_divergence = 0.
         total_multiscale_divergence = 0. if calc_multiscale_loss else None
+        total_vd_divergence = 0.
         contrastive_loss = 0.
 
         self.G.train()
@@ -2250,6 +2252,8 @@ class GigaGAN(nn.Module):
                     for logit in logits:
                         vd_loss = vd_loss + generator_hinge_loss(logits)
 
+                    total_vd_divergence += (vd_loss.item() / grad_accum_every)
+
                     total_loss = total_loss + vd_loss * self.vision_aided_divergence_loss_weight
 
             self.accelerator.backward(total_loss / grad_accum_every, retain_graph = need_contrastive_loss)
@@ -2282,6 +2286,7 @@ class GigaGAN(nn.Module):
         return TrainGenLosses(
             total_divergence,
             total_multiscale_divergence,
+            total_vd_divergence,
             contrastive_loss
         )
 
@@ -2360,7 +2365,13 @@ class GigaGAN(nn.Module):
             apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
             calc_multiscale_loss =  self.calc_multiscale_loss_every > 0 and divisible_by(steps, self.calc_multiscale_loss_every)
 
-            d_loss, multiscale_d_loss, vision_aided_d_loss, gp_loss, recon_loss = self.train_discriminator_step(
+            (
+                d_loss,
+                multiscale_d_loss,
+                vision_aided_d_loss,
+                gp_loss,
+                recon_loss
+            ) = self.train_discriminator_step(
                 dl_iter = dl_iter,
                 grad_accum_every = grad_accum_every,
                 apply_gradient_penalty = apply_gradient_penalty,
@@ -2369,7 +2380,12 @@ class GigaGAN(nn.Module):
 
             self.accelerator.wait_for_everyone()
 
-            g_loss, multiscale_g_loss, contrastive_loss = self.train_generator_step(
+            (
+                g_loss,
+                multiscale_g_loss,
+                vision_aided_g_loss,
+                contrastive_loss
+            ) = self.train_generator_step(
                 dl_iter = dl_iter,
                 batch_size = batch_size,
                 grad_accum_every = grad_accum_every,
@@ -2386,7 +2402,7 @@ class GigaGAN(nn.Module):
                 last_multiscale_g_loss = multiscale_g_loss
 
             if is_first_step or divisible_by(steps, self.log_steps_every):
-                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | VD: {vision_aided_d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f} | CL: {contrastive_loss:.2f}')
+                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | VG: {vision_aided_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | VD: {vision_aided_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f} | CL: {contrastive_loss:.2f}')
 
             self.accelerator.wait_for_everyone()
 
