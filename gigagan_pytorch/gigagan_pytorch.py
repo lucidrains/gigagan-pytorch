@@ -952,7 +952,7 @@ class Generator(BaseGenerator):
 
     @property
     def total_params(self):
-        return sum([p.numel() for p in self.parameters()])
+        return sum([p.numel() for p in self.parameters() if p.requires_grad])
 
     @property
     def device(self):
@@ -1163,10 +1163,10 @@ class VisionAidedDiscriminator(nn.Module):
     def __init__(
         self,
         *,
-        clip: OpenClipAdapter,
         depth = 2,
         dim_head = 64,
         heads = 8,
+        clip: Optional[OpenClipAdapter] = None,
         layer_indices = (-1, -2, -3),
         conv_dim = None,
         text_dim = None,
@@ -1174,6 +1174,12 @@ class VisionAidedDiscriminator(nn.Module):
         num_conv_kernels = 2
     ):
         super().__init__()
+
+        if not exists(clip):
+            clip = OpenClipAdapter()
+
+        set_requires_grad_(clip, False)
+
         self.clip = clip
         dim = clip._dim_image_latent
 
@@ -1198,11 +1204,9 @@ class VisionAidedDiscriminator(nn.Module):
                 )
             ]))
 
-    def parameters(self):
-        return [
-            *self.network.parameters(),
-            *self.to_pred.parameters()
-        ]
+    @property
+    def total_params(self):
+        return sum([p.numel() for p in self.parameters() if p.requires_grad])
 
     @beartype
     def forward(
@@ -1666,6 +1670,7 @@ class GigaGAN(nn.Module):
         *,
         generator: Union[BaseGenerator, Dict],
         discriminator: Union[Discriminator, Dict],
+        vision_aided_discriminator: Optional[Union[VisionAidedDiscriminator, Dict]] = None,
         learning_rate = 2e-4,
         betas = (0.5, 0.9),
         weight_decay = 0.,
@@ -1730,12 +1735,16 @@ class GigaGAN(nn.Module):
         if isinstance(discriminator, dict):
             discriminator = Discriminator(**discriminator)
 
+        if exists(vision_aided_discriminator) and isinstance(vision_aided_discriminator, dict):
+            vision_aided_discriminator = VisionAidedDiscriminator(**vision_aided_discriminator)
+
         assert isinstance(generator, generator_klass)
 
         # use _base to designate unwrapped models
 
         self.G = generator
         self.D = discriminator
+        self.VD = vision_aided_discriminator
 
         # ema
 
@@ -1746,8 +1755,13 @@ class GigaGAN(nn.Module):
 
         # print number of parameters
 
-        self.print(f'Generator parameters: {numerize.numerize(generator.total_params)}')
-        self.print(f'Discriminator parameters: {numerize.numerize(discriminator.total_params)}')
+        self.print(f'Generator: {numerize.numerize(generator.total_params)}')
+        self.print(f'Discriminator: {numerize.numerize(discriminator.total_params)}')
+
+        if exists(self.VD):
+            self.print(f'Vision Discriminator: {numerize.numerize(vision_aided_discriminator.total_params)}')
+
+        self.print('\n')
 
         # text encoder
 
@@ -1763,6 +1777,12 @@ class GigaGAN(nn.Module):
         # prepare for distributed
 
         self.G, self.D, self.G_opt, self.D_opt = self.accelerator.prepare(self.G, self.D, self.G_opt, self.D_opt)
+
+        # vision aided discriminator optimizer
+
+        if exists(self.VD):
+            self.VD_opt = get_optimizer(self.VD.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
+            self.VD_opt = self.accelerator.prepare(self.VD_opt)
 
         # loss related
 
@@ -1816,6 +1836,13 @@ class GigaGAN(nn.Module):
         if exists(self.D_opt.scaler):
             pkg['D_scaler'] = self.D_opt.scaler.state_dict()
 
+        if exists(self.VD):
+            pkg['VD'] = self.unwrapped_VD.state_dict()
+            pkg['VD_opt'] = self.VD_opt.state_dict()
+
+            if exists(self.VD_opt.scaler):
+                pkg['VD_scaler'] = self.VD_opt.scaler.state_dict()
+
         if self.has_ema_generator:
             pkg['G_ema'] = self.G_ema.state_dict()
 
@@ -1833,6 +1860,9 @@ class GigaGAN(nn.Module):
         self.unwrapped_G.load_state_dict(pkg['G'], strict = strict)
         self.unwrapped_D.load_state_dict(pkg['D'], strict = strict)
 
+        if exists(self.VD):
+            self.unwrapped_VD.load_state_dict(pkg['VD'], strict = strict)
+
         if self.has_ema_generator:
             self.G_ema.load_state_dict(pkg['G_ema'])
 
@@ -1846,11 +1876,17 @@ class GigaGAN(nn.Module):
             self.G_opt.load_state_dict(pkg['G_opt'])
             self.D_opt.load_state_dict(pkg['D_opt'])
 
+            if exists(self.VD):
+                self.VD_opt.load_state_dict(pkg['VD_opt'])
+
             if 'G_scaler' in pkg and exists(self.G_opt.scaler):
                 self.G_opt.scaler.load_state_dict(pkg['G_scaler'])
 
             if 'D_scaler' in pkg and exists(self.D_opt.scaler):
                 self.D_opt.scaler.load_state_dict(pkg['D_scaler'])
+
+            if 'VD_scaler' in pkg and exists(self.VD_opt.scaler):
+                self.VD_opt.scaler.load_state_dict(pkg['VD_scaler'])
 
         except Exception as e:
             self.print(f'unable to load optimizers {e.msg}- optimizer states will be reset')
@@ -1869,6 +1905,10 @@ class GigaGAN(nn.Module):
     @property
     def unwrapped_D(self):
         return self.accelerator.unwrap_model(self.D)
+
+    @property
+    def unwrapped_VD(self):
+        return self.accelerator.unwrap_model(self.VD)
 
     def print(self, msg):
         self.accelerator.print(msg)
