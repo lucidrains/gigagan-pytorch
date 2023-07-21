@@ -514,10 +514,11 @@ class UnetUpsampler(BaseGenerator):
 
             x = block2(x, conv_mods_iter = conv_mods)
 
+            x = attn(x)
+
             if exists(cross_attn):
                 x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
 
-            x = attn(x)
             h.append(x)
 
             x = downsample(x)

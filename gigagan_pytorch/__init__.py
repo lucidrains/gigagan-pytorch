@@ -2,6 +2,7 @@ from gigagan_pytorch.gigagan_pytorch import (
     GigaGAN,
     Generator,
     Discriminator,
+    VisionAidedDiscriminator,
     AdaptiveConv2DMod,
     StyleNetwork,
     TextEncoder
@@ -19,6 +20,7 @@ __all__ = [
     GigaGAN,
     Generator,
     Discriminator,
+    VisionAidedDiscriminator,
     AdaptiveConv2DMod,
     StyleNetwork,
     UnetUpsampler,
