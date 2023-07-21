@@ -1182,6 +1182,8 @@ class RandomFixedProjection(nn.Module):
 
 class VisionAidedDiscriminator(nn.Module):
     """ the vision-aided gan loss """
+
+    @beartype
     def __init__(
         self,
         *,
@@ -1236,7 +1238,7 @@ class VisionAidedDiscriminator(nn.Module):
         images,
         texts: Optional[List[str]] = None,
         text_embeds: Optional[Tensor] = None
-    ):
+    ) -> List[Tensor]:
         assert self.unconditional or (exists(text_embeds) ^ exists(texts))
 
         with torch.no_grad():
@@ -1676,6 +1678,7 @@ class Discriminator(nn.Module):
 TrainDiscrLosses = namedtuple('TrainDiscrLosses', [
     'divergence',
     'multiscale_divergence',
+    'vision_aided_divergence',
     'gradient_penalty',
     'aux_reconstruction'
 ])
@@ -2029,6 +2032,8 @@ class GigaGAN(nn.Module):
         calc_multiscale_loss = True
     ):
         total_divergence = 0.
+        total_vision_aided_divergence = 0.
+
         total_gp_loss = 0.
         total_aux_loss = 0.
 
@@ -2108,6 +2113,19 @@ class GigaGAN(nn.Module):
 
                     total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
 
+                # handle vision aided discriminator, if needed
+
+                vd_loss = 0.
+
+                if exists(self.VD):
+                    fake_vision_aided_logits = self.VD(images, **maybe_text_kwargs)
+                    real_vision_aided_logits = self.VD(real_images, **maybe_text_kwargs)
+
+                    for fake_logits, real_logits in zip(fake_vision_aided_logits, real_vision_aided_logits):
+                        vd_loss = vd_loss + discriminator_hinge_loss(real_logits, fake_logits)
+
+                    total_vision_aided_divergence += (vd_loss.item() / grad_accum_every)
+
                 # figure out gradient penalty if needed
 
                 gp_loss = 0.
@@ -2129,6 +2147,9 @@ class GigaGAN(nn.Module):
                 if self.multiscale_divergence_loss_weight > 0.:
                     total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
 
+                if self.vision_aided_divergence_loss_weight > 0.:
+                    total_loss = total_loss + vd_loss * self.vision_aided_divergence_loss_weight
+
                 if self.discr_aux_recon_loss_weight > 0.:
                     aux_loss = sum(aux_recon_losses)
 
@@ -2142,7 +2163,13 @@ class GigaGAN(nn.Module):
 
         self.D_opt.step()
 
-        return TrainDiscrLosses(total_divergence, total_multiscale_divergence, total_gp_loss, total_aux_loss)
+        return TrainDiscrLosses(
+            total_divergence,
+            total_multiscale_divergence,
+            total_vision_aided_divergence,
+            total_gp_loss,
+            total_aux_loss
+        )
 
     def train_generator_step(
         self,
@@ -2195,7 +2222,7 @@ class GigaGAN(nn.Module):
                     calc_aux_loss = False
                 )
 
-                # hinge loss
+                # generator hinge loss discriminator and multiscale
 
                 divergence = generator_hinge_loss(logits)
 
@@ -2212,6 +2239,18 @@ class GigaGAN(nn.Module):
                     total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
 
                     total_loss = total_loss + multiscale_divergence * self.multiscale_divergence_loss_weight
+
+                # vision aided generator hinge loss
+
+                if exists(self.VD) and self.vision_aided_divergence_loss_weight > 0.:
+                    vd_loss = 0.
+
+                    logits = self.VD(image, **maybe_text_kwargs)
+
+                    for logit in logits:
+                        vd_loss = vd_loss + generator_hinge_loss(logits)
+
+                    total_loss = total_loss + vd_loss * self.vision_aided_divergence_loss_weight
 
             self.accelerator.backward(total_loss / grad_accum_every, retain_graph = need_contrastive_loss)
 
@@ -2240,7 +2279,11 @@ class GigaGAN(nn.Module):
         if self.is_main and self.has_ema_generator:
             self.G_ema.update()
 
-        return TrainGenLosses(total_divergence, total_multiscale_divergence, contrastive_loss)
+        return TrainGenLosses(
+            total_divergence,
+            total_multiscale_divergence,
+            contrastive_loss
+        )
 
     def sample(self, dl_iter, batch_size):
         G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
@@ -2317,7 +2360,7 @@ class GigaGAN(nn.Module):
             apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
             calc_multiscale_loss =  self.calc_multiscale_loss_every > 0 and divisible_by(steps, self.calc_multiscale_loss_every)
 
-            d_loss, multiscale_d_loss, gp_loss, recon_loss = self.train_discriminator_step(
+            d_loss, multiscale_d_loss, vision_aided_d_loss, gp_loss, recon_loss = self.train_discriminator_step(
                 dl_iter = dl_iter,
                 grad_accum_every = grad_accum_every,
                 apply_gradient_penalty = apply_gradient_penalty,
@@ -2343,7 +2386,7 @@ class GigaGAN(nn.Module):
                 last_multiscale_g_loss = multiscale_g_loss
 
             if is_first_step or divisible_by(steps, self.log_steps_every):
-                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f} | CL: {contrastive_loss:.2f}')
+                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | D: {d_loss:.2f} | VD: {vision_aided_d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f} | CL: {contrastive_loss:.2f}')
 
             self.accelerator.wait_for_everyone()
 
