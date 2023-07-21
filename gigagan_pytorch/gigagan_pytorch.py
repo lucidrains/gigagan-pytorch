@@ -904,9 +904,9 @@ class Generator(BaseGenerator):
             if has_self_attn:
                 self_attn = SelfAttentionBlock(
                     dim_out,
-                    self_attn_dim_head=self_attn_dim_head,
-                    self_attn_heads=self_attn_heads,
-                    self_attn_ff_mult=self_attn_ff_mult,
+                    dim_head = self_attn_dim_head,
+                    heads = self_attn_heads,
+                    ff_mult = self_attn_ff_mult,
                     dot_product = self_attn_dot_product
             )
 
@@ -914,9 +914,9 @@ class Generator(BaseGenerator):
                 cross_attn = CrossAttentionBlock(
                     dim_out,
                     dim_context = text_encoder.dim,
-                    cross_attn_dim_head = cross_attn_dim_head,
-                    cross_attn_heads = cross_attn_heads,
-                    cross_attn_ff_mult = cross_attn_ff_mult,
+                    dim_head = cross_attn_dim_head,
+                    heads = cross_attn_heads,
+                    ff_mult = cross_attn_ff_mult,
                 )
 
             style_embed_split_dims.extend([
@@ -1766,6 +1766,7 @@ class GigaGAN(nn.Module):
         # text encoder
 
         assert generator.unconditional == discriminator.unconditional
+        assert not exists(vision_aided_discriminator) or vision_aided_discriminator.unconditional == generator.unconditional
 
         self.unconditional = generator.unconditional
 
