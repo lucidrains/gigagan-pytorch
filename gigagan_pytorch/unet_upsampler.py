@@ -434,7 +434,6 @@ class UnetUpsampler(BaseGenerator):
         self.final_res_block = block_klass(dim, dim)
 
         self.final_to_rgb = nn.Conv2d(dim, channels, 1)
-        self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
 
         # resize mode
 
@@ -518,13 +517,13 @@ class UnetUpsampler(BaseGenerator):
             if exists(cross_attn):
                 x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
 
-            x = attn(x) + x
+            x = attn(x)
             h.append(x)
 
             x = downsample(x)
 
         x = self.mid_block1(x, conv_mods_iter = conv_mods)
-        x = self.mid_attn(x) + x
+        x = self.mid_attn(x)
         x = self.mid_block2(x, conv_mods_iter = conv_mods)
 
         # rgbs
@@ -563,7 +562,7 @@ class UnetUpsampler(BaseGenerator):
             if exists(cross_attn):
                 x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
 
-            x = attn(x) + x
+            x = attn(x)
 
             rgb = rgb + to_rgb(x)
             rgbs.append(rgb)
