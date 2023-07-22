@@ -135,7 +135,7 @@ gan(
 )
 ```
 
-## Losses (wip)
+## Losses
 
 * `G` - Generator
 * `MSG` - Multiscale Generator
