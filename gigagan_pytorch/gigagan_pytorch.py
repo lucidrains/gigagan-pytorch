@@ -62,6 +62,18 @@ def safe_unshift(arr):
 def divisible_by(numer, denom):
     return (numer % denom) == 0
 
+def group_by_num_consecutive(arr, num):
+    out = []
+    for ind, el in enumerate(arr):
+        if ind > 0 and divisible_by(ind, num):
+            yield out
+            out = []
+
+        out.append(el)
+
+    if len(out) > 0:
+        yield out
+
 def is_unique(arr):
     return len(set(arr)) == len(arr)
 
@@ -2208,29 +2220,41 @@ class GigaGAN(nn.Module):
 
             # rotate texts
 
-            texts = [*texts[1:], texts[0]]
+            all_texts = [*all_texts[1:], all_texts[0]]
 
-            with torch.accelerator.autocast():
-                fake_logits, *_ = self.D(
-                    all_fake_images,
-                    all_fake_rgbs,
-                    texts = texts,
-                    calc_multiscale_loss = False,
-                    calc_aux_loss = False
-                )
+            zipped_data = zip(
+                all_fake_images.split(batch_size, dim = 0),
+                all_fake_rgbs.split(batch_size, dim = 0),
+                all_real_images.split(batch_size, dim = 0),
+                group_by_num_consecutive(texts, batch_size)
+            )
 
-                real_logits, *_ = self.D(
-                    all_real_images,
-                    texts = texts,
-                    calc_multiscale_loss = False,
-                    calc_aux_loss = False
-                )
+            total_loss = 0.
 
-                matching_loss =aux_matching_loss(real_logits, fake_logits)
+            for fake_images, fake_rgbs, real_images, texts in zipped_data:
+                with torch.accelerator.autocast():
+                    fake_logits, *_ = self.D(
+                        fake_images,
+                        fake_rgbs,
+                        texts = texts,
+                        calc_multiscale_loss = False,
+                        calc_aux_loss = False
+                    )
 
-                total_matching_aware_loss = matching_loss.item()
+                    real_logits, *_ = self.D(
+                        real_images,
+                        texts = texts,
+                        calc_multiscale_loss = False,
+                        calc_aux_loss = False
+                    )
 
-                total_loss = total_loss + total_matching_aware_loss * self.matching_awareness_loss_weight
+                    matching_loss = aux_matching_loss(real_logits, fake_logits)
+
+                    total_matching_aware_loss = (matching_loss.item() / grad_accum_every)
+
+                    loss = matching_loss * self.matching_awareness_loss_weight
+
+                self.accelerator.backward(loss / grad_accum_every)
 
         self.D_opt.step()
 
