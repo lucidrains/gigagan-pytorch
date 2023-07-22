@@ -2114,19 +2114,6 @@ class GigaGAN(nn.Module):
 
                     total_multiscale_divergence += (multiscale_divergence.item() / grad_accum_every)
 
-                # handle vision aided discriminator, if needed
-
-                vd_loss = 0.
-
-                if exists(self.VD):
-                    fake_vision_aided_logits = self.VD(images, **maybe_text_kwargs)
-                    real_vision_aided_logits = self.VD(real_images, **maybe_text_kwargs)
-
-                    for fake_logits, real_logits in zip(fake_vision_aided_logits, real_vision_aided_logits):
-                        vd_loss = vd_loss + discriminator_hinge_loss(real_logits, fake_logits)
-
-                    total_vision_aided_divergence += (vd_loss.item() / grad_accum_every)
-
                 # figure out gradient penalty if needed
 
                 gp_loss = 0.
@@ -2140,6 +2127,33 @@ class GigaGAN(nn.Module):
                     )
 
                     total_gp_loss += (gp_loss.item() / grad_accum_every)
+
+                # handle vision aided discriminator, if needed
+
+                vd_loss = 0.
+
+                if exists(self.VD):
+                    fake_vision_aided_logits = self.VD(images, **maybe_text_kwargs)
+                    real_vision_aided_logits = self.VD(real_images, **maybe_text_kwargs)
+
+                    for fake_logits, real_logits in zip(fake_vision_aided_logits, real_vision_aided_logits):
+                        vd_loss = vd_loss + discriminator_hinge_loss(real_logits, fake_logits)
+
+                    total_vision_aided_divergence += (vd_loss.item() / grad_accum_every)
+
+                    # handle gradient penalty for vision aided discriminator
+
+                    if apply_gradient_penalty:
+                        vd_gp_loss = gradient_penalty(
+                            real_images,
+                            outputs = real_vision_aided_logits,
+                            grad_output_weights = [self.vision_aided_divergence_loss_weight] * len(real_vision_aided_logits),
+                            scaler = self.VD_opt.scaler
+                        )
+
+                        gp_loss = gp_loss + vd_gp_loss
+
+                        total_gp_loss += (vd_gp_loss.item() / grad_accum_every)
 
                 # sum up losses
 

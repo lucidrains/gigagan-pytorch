@@ -205,8 +205,8 @@ $ accelerate launch train.py
 - [ ] do a review of the auxiliary losses
     - [x] add contrastive loss for generator
     - [x] add vision aided loss
+    - [x] add gradient penalty for vision aided discr - make optional
     - [ ] make sure vision aided discriminator trains, inspect output
-    - [ ] add gradient penalty for vision aided discr - make optional
     - [ ] add matching awareness loss - figure out if rotating text conditions by one is good enough for mismatching (without drawing an additional batch from dataloader)
 
 - [ ] port over CLI from lightweight|stylegan2-pytorch
