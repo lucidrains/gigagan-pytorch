@@ -146,6 +146,7 @@ gan(
 * `VD` - Vision-aided Discriminator
 * `VG` - Vision-aided Generator
 * `CL` - Generator Constrastive Loss
+* `MAL` - Matching Aware Loss
 
 A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0` to `10`, and usually staying pretty constant. If at any time after 1k training steps these values persist at triple digits, that would mean something is wrong. It is ok for generator and discriminator values to occasionally dip negative, but it should swing back up to the range above.
 
@@ -206,8 +207,9 @@ $ accelerate launch train.py
     - [x] add contrastive loss for generator
     - [x] add vision aided loss
     - [x] add gradient penalty for vision aided discr - make optional
+    - [x] add matching awareness loss - figure out if rotating text conditions by one is good enough for mismatching (without drawing an additional batch from dataloader)
     - [ ] make sure vision aided discriminator trains, inspect output
-    - [ ] add matching awareness loss - figure out if rotating text conditions by one is good enough for mismatching (without drawing an additional batch from dataloader)
+    - [ ] make sure gradient accumulation works with matching aware loss
 
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image

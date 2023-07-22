@@ -147,7 +147,10 @@ def discriminator_hinge_loss(real, fake):
 # auxiliary losses
 
 def aux_matching_loss(real, fake):
-    return log(1 + real.exp()) + log(1 + fake.exp())
+    """
+    making logits negative, as in this framework, discriminator is 0 for real, high value for fake. GANs can have this arbitrarily swapped, as it only matters if the generator and discriminator are opposites
+    """
+    return log(1 + (-real).exp()) + log(1 + (-fake).exp())
 
 @beartype
 def aux_clip_loss(
@@ -1679,6 +1682,7 @@ TrainDiscrLosses = namedtuple('TrainDiscrLosses', [
     'divergence',
     'multiscale_divergence',
     'vision_aided_divergence',
+    'total_matching_aware_loss',
     'gradient_penalty',
     'aux_reconstruction'
 ])
@@ -1705,6 +1709,7 @@ class GigaGAN(nn.Module):
         multiscale_divergence_loss_weight = 0.1,
         vision_aided_divergence_loss_weight = 0.5,
         generator_contrastive_loss_weight = 0.1,
+        matching_awareness_loss_weight = 0.1,
         calc_multiscale_loss_every = 1,
         apply_gradient_penalty_every = 4,
         ttur_mult = 1,
@@ -1820,6 +1825,7 @@ class GigaGAN(nn.Module):
         self.multiscale_divergence_loss_weight = multiscale_divergence_loss_weight
         self.vision_aided_divergence_loss_weight = vision_aided_divergence_loss_weight
         self.generator_contrastive_loss_weight = generator_contrastive_loss_weight
+        self.matching_awareness_loss_weight = matching_awareness_loss_weight
 
         # steps
 
@@ -2040,6 +2046,15 @@ class GigaGAN(nn.Module):
 
         total_multiscale_divergence = 0. if calc_multiscale_loss else None
 
+        has_matching_awareness = not self.unconditional and self.matching_awareness_loss_weight > 0.
+
+        total_matching_aware_loss = 0.
+
+        all_texts = []
+        all_fake_images = []
+        all_fake_rgbs = []
+        all_real_images = []
+
         self.G.train()
         self.D.train()
 
@@ -2053,6 +2068,9 @@ class GigaGAN(nn.Module):
                 result = next(dl_iter)
                 assert isinstance(result, tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
                 real_images, texts = result
+
+                all_real_images.append(real_iamges)
+                all_texts.extend(texts)
 
             # requires grad for real images, for gradient penalty
 
@@ -2073,6 +2091,9 @@ class GigaGAN(nn.Module):
                     **maybe_text_kwargs,
                     return_all_rgbs = True
                 )
+
+                all_fake_images.append(images)
+                all_fake_rgbs = append(rgbs)
 
                 # detach output of generator, as training discriminator only
 
@@ -2176,12 +2197,48 @@ class GigaGAN(nn.Module):
 
             self.accelerator.backward(total_loss / grad_accum_every)
 
+
+        # matching awareness loss
+        # strategy would be to rotate the texts by one and assume batch is shuffled enough for mismatched conditions
+
+        if has_matching_awareness:
+            all_real_images = torch.cat(all_real_images, dim = 0)
+            all_fake_images = torch.cat(all_fake_images, dim = 0)
+            all_fake_rgbs = torch.cat(all_fake_rgbs, dim = 0)
+
+            # rotate texts
+
+            texts = [*texts[1:], texts[0]]
+
+            with torch.accelerator.autocast():
+                fake_logits, *_ = self.D(
+                    all_fake_images,
+                    all_fake_rgbs,
+                    texts = texts,
+                    calc_multiscale_loss = False,
+                    calc_aux_loss = False
+                )
+
+                real_logits, *_ = self.D(
+                    all_real_images,
+                    texts = texts,
+                    calc_multiscale_loss = False,
+                    calc_aux_loss = False
+                )
+
+                matching_loss =aux_matching_loss(real_logits, fake_logits)
+
+                total_matching_aware_loss = matching_loss.item()
+
+                total_loss = total_loss + total_matching_aware_loss * self.matching_awareness_loss_weight
+
         self.D_opt.step()
 
         return TrainDiscrLosses(
             total_divergence,
             total_multiscale_divergence,
             total_vision_aided_divergence,
+            total_matching_aware_loss,
             total_gp_loss,
             total_aux_loss
         )
@@ -2398,6 +2455,7 @@ class GigaGAN(nn.Module):
                 g_loss,
                 multiscale_g_loss,
                 vision_aided_g_loss,
+                matching_aware_loss,
                 contrastive_loss
             ) = self.train_generator_step(
                 dl_iter = dl_iter,
@@ -2416,7 +2474,7 @@ class GigaGAN(nn.Module):
                 last_multiscale_g_loss = multiscale_g_loss
 
             if is_first_step or divisible_by(steps, self.log_steps_every):
-                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | VG: {vision_aided_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | VD: {vision_aided_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f} | CL: {contrastive_loss:.2f}')
+                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | VG: {vision_aided_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | VD: {vision_aided_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f} | CL: {contrastive_loss:.2f} | MAL: {matching_aware_loss:.2f}')
 
             self.accelerator.wait_for_everyone()
 
