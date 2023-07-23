@@ -318,7 +318,8 @@ class UnetUpsampler(BaseGenerator):
         mid_attn_depth = 1,
         num_conv_kernels = 2,
         resize_mode = 'bilinear',
-        unconditional = True
+        unconditional = True,
+        skip_connect_scale = None
     ):
         super().__init__()
 
@@ -386,6 +387,10 @@ class UnetUpsampler(BaseGenerator):
 
         cross_attn = cast_tuple(cross_attn, length = len(dim_mults))
         assert unconditional or len(full_attn) == len(dim_mults)
+
+        # skip connection scale
+
+        self.skip_connect_scale = default(skip_connect_scale, 2 ** -0.5)
 
         # layers
 
@@ -544,8 +549,8 @@ class UnetUpsampler(BaseGenerator):
             x = upsample(x)
             rgb = upsample_rgb(rgb)
 
-            res1 = h.pop()
-            res2 = h.pop()
+            res1 = h.pop() * self.skip_connect_scale
+            res2 = h.pop() * self.skip_connect_scale
 
             fmap_size = x.shape[-1]
             residual_fmap_size = res1.shape[-1]
