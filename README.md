@@ -209,7 +209,8 @@ $ accelerate launch train.py
     - [x] add gradient penalty for vision aided discr - make optional
     - [x] add matching awareness loss - figure out if rotating text conditions by one is good enough for mismatching (without drawing an additional batch from dataloader)
     - [x] make sure gradient accumulation works with matching aware loss
-    - [ ] make sure vision aided discriminator trains, inspect output
+    - [x] matching awareness loss runs and is stable
+    - [ ] vision aided trains, but is unstable and nans, figure out why
 
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image

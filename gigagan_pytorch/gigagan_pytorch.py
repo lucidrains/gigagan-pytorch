@@ -162,7 +162,7 @@ def aux_matching_loss(real, fake):
     """
     making logits negative, as in this framework, discriminator is 0 for real, high value for fake. GANs can have this arbitrarily swapped, as it only matters if the generator and discriminator are opposites
     """
-    return log(1 + (-real).exp()) + log(1 + (-fake).exp())
+    return (log(1 + (-real).exp()) + log(1 + (-fake).exp())).mean()
 
 @beartype
 def aux_clip_loss(
@@ -1252,8 +1252,10 @@ class VisionAidedDiscriminator(nn.Module):
         self,
         images,
         texts: Optional[List[str]] = None,
-        text_embeds: Optional[Tensor] = None
-    ) -> List[Tensor]:
+        text_embeds: Optional[Tensor] = None,
+        return_inputs = False
+    ):
+
         assert self.unconditional or (exists(text_embeds) ^ exists(texts))
 
         with torch.no_grad():
@@ -1266,6 +1268,8 @@ class VisionAidedDiscriminator(nn.Module):
             image_encodings = image_encodings.detach()
 
         logits = []
+        inputs = []
+
         for layer_index, (rand_proj, conv, to_conv_mod, to_conv_kernel_mod, to_logits) in zip(self.layer_indices, self.layer_discriminators):
             image_encoding = image_encodings[layer_index]
 
@@ -1275,6 +1279,11 @@ class VisionAidedDiscriminator(nn.Module):
             img_fmap = rearrange(rest_tokens, 'b (h w) d -> b d h w', h = height_width)
 
             img_fmap = img_fmap + rearrange(cls_token, 'b 1 d -> b d 1 1 ') # pool the cls token into the rest of the tokens
+
+            if return_inputs:
+                img_fmap.requires_grad_()
+                inputs.append(img_fmap)
+
             img_fmap = rand_proj(img_fmap)
 
             if self.unconditional:
@@ -1292,7 +1301,10 @@ class VisionAidedDiscriminator(nn.Module):
 
             logits.append(layer_logits)
 
-        return logits
+        if not return_inputs:
+            return logits
+
+        return logits, inputs
 
 class Predictor(nn.Module):
     def __init__(
@@ -2081,7 +2093,7 @@ class GigaGAN(nn.Module):
                 assert isinstance(result, tuple), 'dataset should return a tuple of two items for text conditioned training, (images: Tensor, texts: List[str])'
                 real_images, texts = result
 
-                all_real_images.append(real_iamges)
+                all_real_images.append(real_images)
                 all_texts.extend(texts)
 
             # requires grad for real images, for gradient penalty
@@ -2105,7 +2117,7 @@ class GigaGAN(nn.Module):
                 )
 
                 all_fake_images.append(images)
-                all_fake_rgbs = append(rgbs)
+                all_fake_rgbs.append(rgbs)
 
                 # detach output of generator, as training discriminator only
 
@@ -2167,7 +2179,7 @@ class GigaGAN(nn.Module):
 
                 if exists(self.VD):
                     fake_vision_aided_logits = self.VD(images, **maybe_text_kwargs)
-                    real_vision_aided_logits = self.VD(real_images, **maybe_text_kwargs)
+                    real_vision_aided_logits, real_vision_aided_inputs = self.VD(real_images, return_inputs = True, **maybe_text_kwargs)
 
                     for fake_logits, real_logits in zip(fake_vision_aided_logits, real_vision_aided_logits):
                         vd_loss = vd_loss + discriminator_hinge_loss(real_logits, fake_logits)
@@ -2177,8 +2189,9 @@ class GigaGAN(nn.Module):
                     # handle gradient penalty for vision aided discriminator
 
                     if apply_gradient_penalty:
+
                         vd_gp_loss = gradient_penalty(
-                            real_images,
+                            real_vision_aided_inputs,
                             outputs = real_vision_aided_logits,
                             grad_output_weights = [self.vision_aided_divergence_loss_weight] * len(real_vision_aided_logits),
                             scaler = self.VD_opt.scaler
@@ -2214,37 +2227,36 @@ class GigaGAN(nn.Module):
         # strategy would be to rotate the texts by one and assume batch is shuffled enough for mismatched conditions
 
         if has_matching_awareness:
-            all_real_images = torch.cat(all_real_images, dim = 0)
-            all_fake_images = torch.cat(all_fake_images, dim = 0)
-            all_fake_rgbs = torch.cat(all_fake_rgbs, dim = 0)
 
             # rotate texts
 
             all_texts = [*all_texts[1:], all_texts[0]]
+            all_texts = group_by_num_consecutive(texts, batch_size)
 
             zipped_data = zip(
-                all_fake_images.split(batch_size, dim = 0),
-                all_fake_rgbs.split(batch_size, dim = 0),
-                all_real_images.split(batch_size, dim = 0),
-                group_by_num_consecutive(texts, batch_size)
+                all_fake_images,
+                all_fake_rgbs,
+                all_real_images,
+                all_texts
             )
 
             total_loss = 0.
 
             for fake_images, fake_rgbs, real_images, texts in zipped_data:
-                with torch.accelerator.autocast():
+
+                with self.accelerator.autocast():
                     fake_logits, *_ = self.D(
                         fake_images,
                         fake_rgbs,
                         texts = texts,
-                        calc_multiscale_loss = False,
+                        return_multiscale_outputs = False,
                         calc_aux_loss = False
                     )
 
                     real_logits, *_ = self.D(
                         real_images,
                         texts = texts,
-                        calc_multiscale_loss = False,
+                        return_multiscale_outputs = False,
                         calc_aux_loss = False
                     )
 
@@ -2345,7 +2357,7 @@ class GigaGAN(nn.Module):
                     logits = self.VD(image, **maybe_text_kwargs)
 
                     for logit in logits:
-                        vd_loss = vd_loss + generator_hinge_loss(logits)
+                        vd_loss = vd_loss + generator_hinge_loss(logit)
 
                     total_vd_divergence += (vd_loss.item() / grad_accum_every)
 
@@ -2464,6 +2476,7 @@ class GigaGAN(nn.Module):
                 d_loss,
                 multiscale_d_loss,
                 vision_aided_d_loss,
+                matching_aware_loss,
                 gp_loss,
                 recon_loss
             ) = self.train_discriminator_step(
@@ -2479,7 +2492,6 @@ class GigaGAN(nn.Module):
                 g_loss,
                 multiscale_g_loss,
                 vision_aided_g_loss,
-                matching_aware_loss,
                 contrastive_loss
             ) = self.train_generator_step(
                 dl_iter = dl_iter,
