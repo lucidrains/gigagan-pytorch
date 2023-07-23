@@ -1,6 +1,7 @@
 from collections import namedtuple
 from pathlib import Path
 from math import log2, sqrt
+from random import random
 from functools import partial
 
 from torchvision import utils
@@ -39,7 +40,7 @@ def exists(val):
     return val is not None
 
 @beartype
-def is_empty(arr: Union[Tuple, Dict, List]):
+def is_empty(arr: Iterable):
     return len(arr) == 0
 
 def default(*vals):
@@ -177,6 +178,38 @@ def aux_clip_loss(
         text_embeds, _ = clip.embed_texts(texts)
 
     return clip.contrastive_loss(images = images, text_embeds = text_embeds)
+
+# differentiable augmentation - Karras et al. stylegan-ada
+# start with horizontal flip
+
+class DiffAugment(nn.Module):
+    def __init__(
+        self,
+        *,
+        prob,
+        horizontal_flip,
+        horizontal_flip_prob = 0.5
+    ):
+        super().__init__()
+        self.prob = prob
+        assert 0 <= prob <= 1.
+
+        self.horizontal_flip = horizontal_flip
+        self.horizontal_flip_prob = horizontal_flip_prob
+
+    def forward(
+        self,
+        images,
+        rgbs: List[Tensor]
+    ):
+        if random() >= self.prob:
+            return images, rgbs
+
+        if random() < self.horizontal_flip_prob:
+            images = torch.flip(images, (-1,))
+            rgbs = [torch.flip(rgb, (-1,)) for rgb in rgbs]
+
+        return images, rgbs
 
 # rmsnorm (newer papers show mean-centering in layernorm not necessary)
 
@@ -1551,7 +1584,7 @@ class Discriminator(nn.Module):
     def forward(
         self,
         images,
-        rgbs: Optional[List[Tensor]] = None,  # multi-resolution inputs (rgbs) from the generator
+        rgbs: List[Tensor],                   # multi-resolution inputs (rgbs) from the generator
         texts: Optional[List[str]] = None,
         text_encodings: Optional[Tensor] = None,
         text_embeds = None,
@@ -1589,6 +1622,10 @@ class Discriminator(nn.Module):
 
         rgbs_index = {t.shape[-1]: t for t in rgbs} if exists(rgbs) else {}
 
+        # assert that the necessary resolutions are there
+
+        assert is_empty(set(self.multiscale_input_resolutions) - set(rgbs_index.keys())), f'rgbs of necessary resolution {self.multiscale_input_resolutions} were not passed in'
+
         # hold multiscale outputs
 
         multiscale_outputs = []
@@ -1619,11 +1656,6 @@ class Discriminator(nn.Module):
 
             if has_multiscale_input:
                 rgb = rgbs_index.get(resolution, None)
-
-                # if no rgbs passed in, assume all real images, and just resize, though realistically you would concat fake and real images together using helper function `create_real_fake_rgbs` function
-
-                if not exists(rgb):
-                    rgb = self.resize_image_to(images, resolution)
 
                 # multi-scale input features
 
@@ -1716,6 +1748,7 @@ class GigaGAN(nn.Module):
         generator: Union[BaseGenerator, Dict],
         discriminator: Union[Discriminator, Dict],
         vision_aided_discriminator: Optional[Union[VisionAidedDiscriminator, Dict]] = None,
+        diff_augment: Optional[Union[DiffAugment, Dict]] = None,
         learning_rate = 2e-4,
         betas = (0.5, 0.9),
         weight_decay = 0.,
@@ -1726,7 +1759,7 @@ class GigaGAN(nn.Module):
         matching_awareness_loss_weight = 0.1,
         calc_multiscale_loss_every = 1,
         apply_gradient_penalty_every = 4,
-        ttur_mult = 1,
+        resize_image_mode = 'bilinear',
         train_upsampler = False,
         upsampler_replace_rgb_with_input_lowres_image = False,
         log_steps_every = 20,
@@ -1788,6 +1821,13 @@ class GigaGAN(nn.Module):
 
         assert isinstance(generator, generator_klass)
 
+        # diff augment
+
+        if isinstance(diff_augment, dict):
+            diff_augment = DiffAugment(**diff_augment)
+
+        self.diff_augment = diff_augment
+
         # use _base to designate unwrapped models
 
         self.G = generator
@@ -1823,7 +1863,7 @@ class GigaGAN(nn.Module):
         # optimizers
 
         self.G_opt = get_optimizer(self.G.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
-        self.D_opt = get_optimizer(self.D.parameters(), lr = learning_rate * ttur_mult, betas = betas, weight_decay = weight_decay)
+        self.D_opt = get_optimizer(self.D.parameters(), lr = learning_rate, betas = betas, weight_decay = weight_decay)
 
         # prepare for distributed
 
@@ -1842,6 +1882,10 @@ class GigaGAN(nn.Module):
         self.vision_aided_divergence_loss_weight = vision_aided_divergence_loss_weight
         self.generator_contrastive_loss_weight = generator_contrastive_loss_weight
         self.matching_awareness_loss_weight = matching_awareness_loss_weight
+
+        # resize image mode
+
+        self.resize_image_mode = resize_image_mode
 
         # steps
 
@@ -1987,6 +2031,9 @@ class GigaGAN(nn.Module):
     def is_local_main(self):
         return self.accelerator.is_local_main_process
 
+    def resize_image_to(self, images, resolution):
+        return F.interpolate(images, resolution, mode = self.resize_image_mode)
+
     @beartype
     def set_dataloader(self, dl: DataLoader):
         assert not exists(self.train_dl), 'training dataloader has already been set'
@@ -2101,6 +2148,15 @@ class GigaGAN(nn.Module):
             real_images = real_images.to(self.device)
             real_images.requires_grad_()
 
+            real_images_rgbs = [self.resize_image_to(real_images, resolution) for resolution in self.D.multiscale_input_resolutions]
+
+            # diff augment real images
+
+            if exists(self.diff_augment):
+                real_images, real_images_rgbs = self.diff_augment(real_images, real_images_rgbs)
+
+            # batch size
+
             batch_size = real_images.shape[0]
 
             # for discriminator training, fit upsampler and image synthesis logic under same function
@@ -2118,6 +2174,11 @@ class GigaGAN(nn.Module):
 
                 all_fake_images.append(images)
                 all_fake_rgbs.append(rgbs)
+
+                # diff augment
+
+                if exists(self.diff_augment):
+                    images, rgbs = self.diff_augment(images, rgbs)
 
                 # detach output of generator, as training discriminator only
 
@@ -2139,6 +2200,7 @@ class GigaGAN(nn.Module):
 
                 real_logits, real_multiscale_logits, aux_recon_losses = self.D(
                     real_images,
+                    real_images_rgbs,
                     **maybe_text_kwargs,
                     return_multiscale_outputs = calc_multiscale_loss,
                     calc_aux_loss = True
@@ -2308,22 +2370,27 @@ class GigaGAN(nn.Module):
             G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
 
             with self.accelerator.autocast():
-                image, rgbs = self.G(
+                images, rgbs = self.G(
                     **G_kwargs,
                     **maybe_text_kwargs,
                     return_all_rgbs = True
                 )
 
+                # diff augment
+
+                if exists(self.diff_augment):
+                    images, rgbs = self.diff_augment(images, rgbs)
+
                 # accumulate all images and texts for maybe contrastive loss
 
                 if self.need_contrastive_loss:
-                    all_images.append(image)
+                    all_images.append(images)
                     all_texts.extend(maybe_text_kwargs['texts'])
 
                 # discriminator
 
                 logits, multiscale_logits, _ = self.D(
-                    image,
+                    images,
                     rgbs,
                     **maybe_text_kwargs,
                     return_multiscale_outputs = calc_multiscale_loss,
@@ -2353,7 +2420,7 @@ class GigaGAN(nn.Module):
                 if self.need_vision_aided_discriminator:
                     vd_loss = 0.
 
-                    logits = self.VD(image, **maybe_text_kwargs)
+                    logits = self.VD(images, **maybe_text_kwargs)
 
                     for logit in logits:
                         vd_loss = vd_loss + generator_hinge_loss(logit)

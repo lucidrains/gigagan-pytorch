@@ -197,6 +197,9 @@ $ accelerate launch train.py
     - [x] make sure gradient accumulation works with matching aware loss
     - [x] matching awareness loss runs and is stable
     - [x] vision aided trains
+- [x] add some differentiable augmentations, proven technique from the old GAN days
+    - [x] remove any magic being done with automatic rgbs processing, and have it explicitly passed in - offer functions on the discriminator that can process real images into the right multi-scales
+    - [x] add horizontal flip for starters
 
 - [ ] add accelerate
     - [x] works single machine
@@ -206,10 +209,6 @@ $ accelerate launch train.py
 
 - [ ] clip should be optional for all modules, and managed by `GigaGAN`, with text -> text embeds processed once
 - [ ] add ability to select a random subset from multiscale dimension, for efficiency
-
-- [ ] add some differentiable augmentations, proven technique from the old GAN days
-    - [ ] remove any magic being done with automatic rgbs processing, and have it explicitly passed in - offer functions on the discriminator that can process real images into the right multi-scales
-    - [ ] add horizontal flip for starters
 
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image
@@ -246,11 +245,11 @@ $ accelerate launch train.py
 }
 ```
 
-```bibtex
-@inproceedings{Heusel2017GANsTB,
-    title   = {GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium},
-    author  = {Martin Heusel and Hubert Ramsauer and Thomas Unterthiner and Bernhard Nessler and Sepp Hochreiter},
-    booktitle = {NIPS},
-    year    = {2017}
+```
+@inproceedings{Karras2020ada,
+  title     = {Training Generative Adversarial Networks with Limited Data},
+  author    = {Tero Karras and Miika Aittala and Janne Hellsten and Samuli Laine and Jaakko Lehtinen and Timo Aila},
+  booktitle = {Proc. NeurIPS},
+  year      = {2020}
 }
 ```
