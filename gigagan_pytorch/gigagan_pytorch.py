@@ -2509,7 +2509,23 @@ class GigaGAN(nn.Module):
                 last_multiscale_g_loss = multiscale_g_loss
 
             if is_first_step or divisible_by(steps, self.log_steps_every):
-                self.print(f' G: {g_loss:.2f} | MSG: {last_multiscale_g_loss:.2f} | VG: {vision_aided_g_loss:.2f} | D: {d_loss:.2f} | MSD: {last_multiscale_d_loss:.2f} | VD: {vision_aided_d_loss:.2f} | GP: {last_gp_loss:.2f} | SSL: {recon_loss:.2f} | CL: {contrastive_loss:.2f} | MAL: {matching_aware_loss:.2f}')
+
+                losses = (
+                    ('G', g_loss),
+                    ('MSG', last_multiscale_g_loss),
+                    ('VG', vision_aided_g_loss),
+                    ('D', d_loss),
+                    ('MSD', last_multiscale_d_loss),
+                    ('VD', vision_aided_d_loss),
+                    ('GP', last_gp_loss),
+                    ('SSL', recon_loss),
+                    ('CL', contrastive_loss),
+                    ('MAL', matching_aware_loss)
+                )
+
+                losses_str = ' | '.join([f'{loss_name}: {loss:.2f}' for loss_name, loss in losses])
+
+                self.print(losses_str)
 
             self.accelerator.wait_for_everyone()
 
