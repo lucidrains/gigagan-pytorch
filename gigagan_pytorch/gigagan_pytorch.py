@@ -824,7 +824,6 @@ class Generator(BaseGenerator):
         num_conv_kernels = 2,  # the number of adaptive conv kernels
         num_skip_layers_excite = 0,
         unconditional = False,
-        use_glu = True,
         pixel_shuffle_upsample = False
     ):
         super().__init__()
@@ -917,16 +916,13 @@ class Generator(BaseGenerator):
                 dim_skip_in, _ = dim_pairs[ind + num_skip_layers_excite]
                 skip_squeeze_excite = SqueezeExcite(dim_in, dim_skip_in)
 
-            dim_inner = dim_out * (2 if use_glu else 1)
-            activation = partial(nn.GLU, dim = 1) if use_glu else leaky_relu
-
             resnet_block = nn.ModuleList([
-                adaptive_conv(dim_in, dim_inner),
-                Noise(dim_inner),
-                activation(),
-                adaptive_conv(dim_out, dim_inner),
-                Noise(dim_inner),
-                activation()
+                adaptive_conv(dim_in, dim_out),
+                Noise(dim_out),
+                leaky_relu(),
+                adaptive_conv(dim_out, dim_out),
+                Noise(dim_out),
+                leaky_relu()
             ])
 
             to_rgb = adaptive_conv(dim_out, channels)
@@ -1217,8 +1213,6 @@ class VisionAidedDiscriminator(nn.Module):
         if not exists(clip):
             clip = OpenClipAdapter()
 
-        set_requires_grad_(clip, False)
-
         self.clip = clip
         dim = clip._dim_image_latent
 
@@ -1243,9 +1237,12 @@ class VisionAidedDiscriminator(nn.Module):
                 )
             ]))
 
+    def parameters(self):
+        return self.layer_discriminators.parameters()
+
     @property
     def total_params(self):
-        return sum([p.numel() for p in self.parameters() if p.requires_grad])
+        return sum([p.numel() for p in self.parameters()])
 
     @beartype
     def forward(
@@ -1253,7 +1250,7 @@ class VisionAidedDiscriminator(nn.Module):
         images,
         texts: Optional[List[str]] = None,
         text_embeds: Optional[Tensor] = None,
-        return_inputs = False
+        return_clip_encodings = False
     ):
 
         assert self.unconditional or (exists(text_embeds) ^ exists(texts))
@@ -1263,12 +1260,9 @@ class VisionAidedDiscriminator(nn.Module):
                 self.clip.eval()
                 text_embeds = self.clip.embed_texts
 
-            self.clip.eval()
-            _, image_encodings = self.clip.embed_images(images)
-            image_encodings = image_encodings.detach()
+        _, image_encodings = self.clip.embed_images(images)
 
         logits = []
-        inputs = []
 
         for layer_index, (rand_proj, conv, to_conv_mod, to_conv_kernel_mod, to_logits) in zip(self.layer_indices, self.layer_discriminators):
             image_encoding = image_encodings[layer_index]
@@ -1279,10 +1273,6 @@ class VisionAidedDiscriminator(nn.Module):
             img_fmap = rearrange(rest_tokens, 'b (h w) d -> b d h w', h = height_width)
 
             img_fmap = img_fmap + rearrange(cls_token, 'b 1 d -> b d 1 1 ') # pool the cls token into the rest of the tokens
-
-            if return_inputs:
-                img_fmap.requires_grad_()
-                inputs.append(img_fmap)
 
             img_fmap = rand_proj(img_fmap)
 
@@ -1301,10 +1291,10 @@ class VisionAidedDiscriminator(nn.Module):
 
             logits.append(layer_logits)
 
-        if not return_inputs:
+        if not return_clip_encodings:
             return logits
 
-        return logits, inputs
+        return logits, image_encodings
 
 class Predictor(nn.Module):
     def __init__(
@@ -1813,6 +1803,8 @@ class GigaGAN(nn.Module):
 
         # print number of parameters
 
+        self.print('\n')
+
         self.print(f'Generator: {numerize.numerize(generator.total_params)}')
         self.print(f'Discriminator: {numerize.numerize(discriminator.total_params)}')
 
@@ -1971,6 +1963,14 @@ class GigaGAN(nn.Module):
     @property
     def unwrapped_VD(self):
         return self.accelerator.unwrap_model(self.VD)
+
+    @property
+    def need_vision_aided_discriminator(self):
+        return exists(self.VD) and self.vision_aided_divergence_loss_weight > 0.
+
+    @property
+    def need_contrastive_loss(self):
+        return self.generator_contrastive_loss_weight > 0. and not self.unconditional
 
     def print(self, msg):
         self.accelerator.print(msg)
@@ -2177,9 +2177,10 @@ class GigaGAN(nn.Module):
 
                 vd_loss = 0.
 
-                if exists(self.VD):
+                if self.need_vision_aided_discriminator:
+
                     fake_vision_aided_logits = self.VD(images, **maybe_text_kwargs)
-                    real_vision_aided_logits, real_vision_aided_inputs = self.VD(real_images, return_inputs = True, **maybe_text_kwargs)
+                    real_vision_aided_logits, clip_encodings = self.VD(real_images, return_clip_encodings = True, **maybe_text_kwargs)
 
                     for fake_logits, real_logits in zip(fake_vision_aided_logits, real_vision_aided_logits):
                         vd_loss = vd_loss + discriminator_hinge_loss(real_logits, fake_logits)
@@ -2191,7 +2192,7 @@ class GigaGAN(nn.Module):
                     if apply_gradient_penalty:
 
                         vd_gp_loss = gradient_penalty(
-                            real_vision_aided_inputs,
+                            clip_encodings,
                             outputs = real_vision_aided_logits,
                             grad_output_weights = [self.vision_aided_divergence_loss_weight] * len(real_vision_aided_logits),
                             scaler = self.VD_opt.scaler
@@ -2286,8 +2287,6 @@ class GigaGAN(nn.Module):
         grad_accum_every = 1,
         calc_multiscale_loss = True
     ):
-        need_contrastive_loss = self.generator_contrastive_loss_weight > 0. and not self.unconditional
-
         total_divergence = 0.
         total_multiscale_divergence = 0. if calc_multiscale_loss else None
         total_vd_divergence = 0.
@@ -2317,7 +2316,7 @@ class GigaGAN(nn.Module):
 
                 # accumulate all images and texts for maybe contrastive loss
 
-                if need_contrastive_loss:
+                if self.need_contrastive_loss:
                     all_images.append(image)
                     all_texts.extend(maybe_text_kwargs['texts'])
 
@@ -2351,7 +2350,7 @@ class GigaGAN(nn.Module):
 
                 # vision aided generator hinge loss
 
-                if exists(self.VD) and self.vision_aided_divergence_loss_weight > 0.:
+                if self.need_vision_aided_discriminator:
                     vd_loss = 0.
 
                     logits = self.VD(image, **maybe_text_kwargs)
@@ -2363,12 +2362,12 @@ class GigaGAN(nn.Module):
 
                     total_loss = total_loss + vd_loss * self.vision_aided_divergence_loss_weight
 
-            self.accelerator.backward(total_loss / grad_accum_every, retain_graph = need_contrastive_loss)
+            self.accelerator.backward(total_loss / grad_accum_every, retain_graph = self.need_contrastive_loss)
 
         # if needs the generator contrastive loss
         # gather up all images and texts and calculate it
 
-        if need_contrastive_loss:
+        if self.need_contrastive_loss:
             all_images = torch.cat(all_images, dim = 0)
 
             contrastive_loss = aux_clip_loss(

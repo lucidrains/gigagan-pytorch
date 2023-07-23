@@ -6,7 +6,7 @@
 
 Implementation of <a href="https://arxiv.org/abs/2303.05511v2">GigaGAN</a> <a href="https://mingukkang.github.io/GigaGAN/">(project page)</a>, new SOTA GAN out of Adobe.
 
-I will also add a few findings from <a href="https://github.com/lucidrains/lightweight-gan">lightweight gan</a>, for faster convergence (skip layer excitation), better stability (reconstruction auxiliary loss in discriminator), and improved generator results (GLU activations).
+I will also add a few findings from <a href="https://github.com/lucidrains/lightweight-gan">lightweight gan</a>, for faster convergence (skip layer excitation) and better stability (reconstruction auxiliary loss in discriminator)
 
 It will also contain the code for the 1k - 4k upsamplers, which I find to be the highlight of this paper.
 
@@ -189,6 +189,14 @@ $ accelerate launch train.py
 - [x] make text conditioned training work for both base and upsampler
 - [x] make recon more efficient by random sampling patches
 - [x] make sure generator and discriminator can also accept pre-encoded CLIP text encodings
+- [x] do a review of the auxiliary losses
+    - [x] add contrastive loss for generator
+    - [x] add vision aided loss
+    - [x] add gradient penalty for vision aided discr - make optional
+    - [x] add matching awareness loss - figure out if rotating text conditions by one is good enough for mismatching (without drawing an additional batch from dataloader)
+    - [x] make sure gradient accumulation works with matching aware loss
+    - [x] matching awareness loss runs and is stable
+    - [x] vision aided trains
 
 - [ ] add accelerate
     - [x] works single machine
@@ -202,15 +210,6 @@ $ accelerate launch train.py
 - [ ] add some differentiable augmentations, proven technique from the old GAN days
     - [ ] remove any magic being done with automatic rgbs processing, and have it explicitly passed in - offer functions on the discriminator that can process real images into the right multi-scales
     - [ ] add horizontal flip for starters
-
-- [ ] do a review of the auxiliary losses
-    - [x] add contrastive loss for generator
-    - [x] add vision aided loss
-    - [x] add gradient penalty for vision aided discr - make optional
-    - [x] add matching awareness loss - figure out if rotating text conditions by one is good enough for mismatching (without drawing an additional batch from dataloader)
-    - [x] make sure gradient accumulation works with matching aware loss
-    - [x] matching awareness loss runs and is stable
-    - [ ] vision aided trains, but is unstable and nans, figure out why
 
 - [ ] port over CLI from lightweight|stylegan2-pytorch
 - [ ] hook up laion dataset for text-image
