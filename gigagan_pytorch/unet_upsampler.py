@@ -301,17 +301,17 @@ class UnetUpsampler(BaseGenerator):
         text_encoder: Optional[Union[TextEncoder, Dict]] = None,
         style_network: Optional[Union[StyleNetwork, Dict]] = None,
         style_network_dim = None,
-        dim_mults = (1, 2, 4, 8),
+        dim_mults = (1, 2, 4, 8, 16),
         channels = 3,
         resnet_block_groups = 8,
-        full_attn = (False, False, False, True),
-        cross_attn = (False, False, False, True),
+        full_attn = (False, False, False, True, True),
+        cross_attn = (False, False, False, True, True),
         flash_attn = True,
         self_attn_dim_head = 64,
         self_attn_heads = 8,
         self_attn_dot_product = True,
         self_attn_ff_mult = 4,
-        attn_depths = (1, 1, 1, 1),
+        attn_depths = (1, 1, 1, 1, 1),
         cross_attn_dim_head = 64,
         cross_attn_heads = 8,
         cross_ff_mult = 4,
@@ -584,7 +584,7 @@ class UnetUpsampler(BaseGenerator):
 
         # only keep those rgbs whose feature map is greater than the input image to be upsampled
 
-        rgbs = list(filter(lambda t: t.shape[-1] >= shape[-1], rgbs))
+        rgbs = list(filter(lambda t: t.shape[-1] <= shape[-1], rgbs))
 
         if not replace_rgb_with_input_lowres_image:
             return rgb, rgbs

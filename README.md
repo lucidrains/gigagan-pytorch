@@ -84,6 +84,10 @@ gan(
     steps = 100,
     grad_accum_every = 8
 )
+
+# after much training
+
+images = gan.generate(batch_size = 4) # (4, 3, 256, 256)
 ```
 
 For unconditional Unet Upsampler
@@ -133,6 +137,12 @@ gan(
     steps = 100,
     grad_accum_every = 8
 )
+
+# after much training
+
+lowres = torch.randn(1, 3, 128, 128).cuda()
+
+images = gan.generate(lowres) # (1, 3, 256, 256)
 ```
 
 ## Losses
