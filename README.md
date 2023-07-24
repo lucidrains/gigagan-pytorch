@@ -245,11 +245,11 @@ $ accelerate launch train.py
 }
 ```
 
-```
+```bibtex
 @inproceedings{Karras2020ada,
-  title     = {Training Generative Adversarial Networks with Limited Data},
-  author    = {Tero Karras and Miika Aittala and Janne Hellsten and Samuli Laine and Jaakko Lehtinen and Timo Aila},
-  booktitle = {Proc. NeurIPS},
-  year      = {2020}
+    title     = {Training Generative Adversarial Networks with Limited Data},
+    author    = {Tero Karras and Miika Aittala and Janne Hellsten and Samuli Laine and Jaakko Lehtinen and Timo Aila},
+    booktitle = {Proc. NeurIPS},
+    year      = {2020}
 }
 ```
