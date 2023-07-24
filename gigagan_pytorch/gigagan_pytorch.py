@@ -2043,6 +2043,13 @@ class GigaGAN(nn.Module):
 
         self.train_dl = self.accelerator.prepare(self.train_dl)
 
+    # generate function
+
+    @torch.inference_mode()
+    def generate(self, *args, **kwargs):
+        self.G_ema.eval()
+        return self.G_ema(*args, **kwargs)
+
     # create EMA generator
 
     def create_ema_generator(
@@ -2190,6 +2197,7 @@ class GigaGAN(nn.Module):
             # main divergence loss
 
             with self.accelerator.autocast():
+
                 fake_logits, fake_multiscale_logits, _ = self.D(
                     images,
                     rgbs,
