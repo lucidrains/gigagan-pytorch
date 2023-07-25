@@ -450,6 +450,13 @@ class UnetUpsampler(BaseGenerator):
         self.style_embed_split_dims = style_embed_split_dims
 
     @property
+    def allowable_rgb_resolutions(self):
+        input_res_base = int(log2(self.input_image_size))
+        output_res_base = int(log2(self.image_size))
+        allowed_rgb_res_base = list(range(input_res_base + 1, output_res_base))
+        return [*map(lambda p: 2 ** p, allowed_rgb_res_base)]
+
+    @property
     def device(self):
         return next(self.parameters()).device
 
@@ -584,7 +591,7 @@ class UnetUpsampler(BaseGenerator):
 
         # only keep those rgbs whose feature map is greater than the input image to be upsampled
 
-        rgbs = list(filter(lambda t: t.shape[-1] <= shape[-1], rgbs))
+        rgbs = list(filter(lambda t: t.shape[-1] > shape[-1], rgbs))
 
         if not replace_rgb_with_input_lowres_image:
             return rgb, rgbs
