@@ -108,7 +108,7 @@ gan = GigaGAN(
         ),
         dim = 32,
         image_size = 256,
-        input_image_size = 128,
+        input_image_size = 64,
         unconditional = True
     ),
     discriminator = dict(
@@ -116,6 +116,7 @@ gan = GigaGAN(
         dim_max = 512,
         image_size = 256,
         num_skip_layers_excite = 4,
+        multiscale_input_resolutions = (128,),
         unconditional = True
     ),
     amp = True
@@ -140,7 +141,7 @@ gan(
 
 # after much training
 
-lowres = torch.randn(1, 3, 128, 128).cuda()
+lowres = torch.randn(1, 3, 64, 64).cuda()
 
 images = gan.generate(lowres) # (1, 3, 256, 256)
 ```

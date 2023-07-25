@@ -1614,6 +1614,7 @@ class Discriminator(nn.Module):
         x = images
 
         image_size = (self.image_size, self.image_size)
+
         assert x.shape[-2:] == image_size
 
         batch = x.shape[0]
@@ -1833,6 +1834,11 @@ class GigaGAN(nn.Module):
         self.G = generator
         self.D = discriminator
         self.VD = vision_aided_discriminator
+
+        # validate multiscale input resolutions
+
+        if train_upsampler:
+            assert is_empty(set(discriminator.multiscale_input_resolutions) - set(generator.allowable_rgb_resolutions)), f'only multiscale input resolutions of {generator.allowable_rgb_resolutions} is allowed based on the unet input and output image size'
 
         # ema
 
