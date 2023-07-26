@@ -1762,7 +1762,6 @@ class GigaGAN(nn.Module):
         apply_gradient_penalty_every = 4,
         resize_image_mode = 'bilinear',
         train_upsampler = False,
-        upsampler_replace_rgb_with_input_lowres_image = False,
         log_steps_every = 20,
         create_ema_generator_at_init = True,
         save_and_sample_every = 1000,
@@ -1804,8 +1803,6 @@ class GigaGAN(nn.Module):
         else:
             generator_klass = Generator
 
-        self.upsampler_replace_rgb_with_input_lowres_image = upsampler_replace_rgb_with_input_lowres_image
-
         # gradient penalty and auxiliary recon loss
 
         self.apply_gradient_penalty_every = apply_gradient_penalty_every
@@ -1838,7 +1835,7 @@ class GigaGAN(nn.Module):
         # validate multiscale input resolutions
 
         if train_upsampler:
-            assert is_empty(set(discriminator.multiscale_input_resolutions) - set(generator.allowable_rgb_resolutions)), f'only multiscale input resolutions of {generator.allowable_rgb_resolutions} is allowed based on the unet input and output image size'
+            assert is_empty(set(discriminator.multiscale_input_resolutions) - set(generator.allowable_rgb_resolutions)), f'only multiscale input resolutions of {generator.allowable_rgb_resolutions} is allowed based on the unet input and output image size. simply do Discriminator(multiscale_input_resolutions = unet.allowable_rgb_resolutions) to resolve this error'
 
         # ema
 
@@ -2098,10 +2095,7 @@ class GigaGAN(nn.Module):
             size = self.G.input_image_size
             lowres_real_images = F.interpolate(real_images, (size, size))
 
-            G_kwargs = dict(
-                lowres_image = lowres_real_images,
-                replace_rgb_with_input_lowres_image = self.upsampler_replace_rgb_with_input_lowres_image
-            )
+            G_kwargs = dict(lowres_image = lowres_real_images)
         else:
             assert exists(batch_size)
 

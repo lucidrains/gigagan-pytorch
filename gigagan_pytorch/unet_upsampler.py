@@ -453,7 +453,7 @@ class UnetUpsampler(BaseGenerator):
     def allowable_rgb_resolutions(self):
         input_res_base = int(log2(self.input_image_size))
         output_res_base = int(log2(self.image_size))
-        allowed_rgb_res_base = list(range(input_res_base + 1, output_res_base))
+        allowed_rgb_res_base = list(range(input_res_base, output_res_base))
         return [*map(lambda p: 2 ** p, allowed_rgb_res_base)]
 
     @property
@@ -593,17 +593,8 @@ class UnetUpsampler(BaseGenerator):
 
         rgbs = list(filter(lambda t: t.shape[-1] > shape[-1], rgbs))
 
-        if not replace_rgb_with_input_lowres_image:
-            return rgb, rgbs
+        # and return the original input image as the smallest rgb
 
-        # replace the rgb of the corresponding same dimension as the input low res image
+        rgbs = [lowres_image, *rgbs]
 
-        output_rgbs = []
-
-        for rgb in rgbs:
-            if rgb.shape[-1] == lowres_image.shape[-1]:
-                output_rgbs.append(lowres_image)
-            else:
-                output_rgbs.append(rgb)
-
-        return rgb, output_rgbs
+        return rgb, rgbs
