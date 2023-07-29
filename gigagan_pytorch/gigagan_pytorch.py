@@ -103,7 +103,7 @@ def set_requires_grad_(
 
 # activation functions
 
-def leaky_relu(neg_slope = 0.1):
+def leaky_relu(neg_slope = 0.2):
     return nn.LeakyReLU(neg_slope)
 
 def conv2d_3x3(dim_in, dim_out):
@@ -958,7 +958,7 @@ class Generator(BaseGenerator):
                 leaky_relu()
             ])
 
-            to_rgb = adaptive_conv(dim_out, channels)
+            to_rgb = AdaptiveConv2DMod(dim_out, channels, 1, num_conv_kernels = 1, demod = False)
 
             self_attn = cross_attn = rgb_upsample = upsample = None
 

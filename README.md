@@ -24,6 +24,8 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 
 - <a href="https://github.com/CerebralSeed">@CerebralSeed</a> for pull requesting the initial sampling code for both the generator and upsampler!
 
+- <a href="https://github.com/randintgenr ">Keerth</a> for the code review and pointing out some discrepancies with the paper!
+
 ## Install
 
 ```bash
