@@ -2472,11 +2472,11 @@ class GigaGAN(nn.Module):
             contrastive_loss
         )
 
-    def sample(self, dl_iter, batch_size):
+    def sample(self, model, dl_iter, batch_size):
         G_kwargs, maybe_text_kwargs = self.generate_kwargs(dl_iter, batch_size)
 
         with self.accelerator.autocast():
-            generator_output = self.G(**G_kwargs, **maybe_text_kwargs)
+            generator_output = model(**G_kwargs, **maybe_text_kwargs)
 
         if not self.train_upsampler:
             return generator_output
@@ -2502,7 +2502,7 @@ class GigaGAN(nn.Module):
 
         assert exists(dl_iter)
 
-        sample_models_and_output_file_name = [(self.G, f'sample-{milestone}.png')]
+        sample_models_and_output_file_name = [(self.unwrapped_G, f'sample-{milestone}.png')]
 
         if self.has_ema_generator:
             sample_models_and_output_file_name.append((self.G_ema, f'ema-sample-{milestone}.png'))
@@ -2510,8 +2510,8 @@ class GigaGAN(nn.Module):
         for model, filename in sample_models_and_output_file_name:
             model.eval()
 
-            all_images_list = list(map(lambda n: self.sample(dl_iter, n), batches))
-            all_images = torch.cat(all_images_list, dim=0)
+            all_images_list = list(map(lambda n: self.sample(model, dl_iter, n), batches))
+            all_images = torch.cat(all_images_list, dim = 0)
 
             all_images.clamp_(0., 1.)
 
