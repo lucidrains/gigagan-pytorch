@@ -2092,7 +2092,7 @@ class GigaGAN(nn.Module):
         # if training upsample generator, need to downsample real images
 
         if self.train_upsampler:
-            size = self.G.input_image_size
+            size = self.unwrapped_G.input_image_size
             lowres_real_images = F.interpolate(real_images, (size, size))
 
             G_kwargs = dict(lowres_image = lowres_real_images)
@@ -2156,7 +2156,7 @@ class GigaGAN(nn.Module):
             real_images = real_images.to(self.device)
             real_images.requires_grad_()
 
-            real_images_rgbs = [self.resize_image_to(real_images, resolution) for resolution in self.D.multiscale_input_resolutions]
+            real_images_rgbs = [self.resize_image_to(real_images, resolution) for resolution in self.unwrapped_D.multiscale_input_resolutions]
 
             # diff augment real images
 
