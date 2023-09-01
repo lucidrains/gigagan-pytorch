@@ -2242,7 +2242,8 @@ class GigaGAN(nn.Module):
                         scaler = self.D_opt.scaler
                     )
 
-                    total_gp_loss += (gp_loss.item() / grad_accum_every)
+                    if not torch.isnan(gp_loss):
+                        total_gp_loss += (gp_loss.item() / grad_accum_every)
 
                 # handle vision aided discriminator, if needed
 
@@ -2269,9 +2270,10 @@ class GigaGAN(nn.Module):
                             scaler = self.VD_opt.scaler
                         )
 
-                        gp_loss = gp_loss + vd_gp_loss
+                        if not torch.isnan(vd_gp_loss):
+                            gp_loss = gp_loss + vd_gp_loss
 
-                        total_gp_loss += (vd_gp_loss.item() / grad_accum_every)
+                            total_gp_loss += (vd_gp_loss.item() / grad_accum_every)
 
                 # sum up losses
 
