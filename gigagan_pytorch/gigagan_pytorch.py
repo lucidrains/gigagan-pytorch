@@ -119,7 +119,8 @@ def gradient_penalty(
     outputs,
     grad_output_weights = None,
     weight = 10,
-    scaler: Optional[GradScaler] = None
+    scaler: Optional[GradScaler] = None,
+    eps = 1e-4
 ):
     if not isinstance(outputs, (list, tuple)):
         outputs = [outputs]
@@ -143,7 +144,7 @@ def gradient_penalty(
 
     if exists(scaler):
         scale = scaler.get_scale()
-        inv_scale = 1. / max(scale, 1e-6)
+        inv_scale = 1. / max(scale, eps)
         gradients = maybe_scaled_gradients * inv_scale
 
     gradients = rearrange(gradients, 'b ... -> b (...)')
