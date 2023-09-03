@@ -2135,9 +2135,13 @@ class GigaGAN(nn.Module):
         all_real_images = []
 
         self.G.train()
-        self.D.train()
 
+        self.D.train()
         self.D_opt.zero_grad()
+
+        if self.need_vision_aided_discriminator:
+            self.VD.train()
+            self.VD_opt.zero_grad()
 
         for _ in range(grad_accum_every):
 
@@ -2343,6 +2347,9 @@ class GigaGAN(nn.Module):
                 self.accelerator.backward(loss / grad_accum_every)
 
         self.D_opt.step()
+
+        if self.need_vision_aided_discriminator:
+            self.VD_opt.step()
 
         return TrainDiscrLosses(
             total_divergence,
