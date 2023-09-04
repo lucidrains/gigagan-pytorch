@@ -1543,7 +1543,6 @@ class Discriminator(nn.Module):
 
         self.to_logits = nn.Sequential(
             conv2d_3x3(dim_last, dim_last),
-            leaky_relu(),
             Rearrange('b c h w -> b (c h w)'),
             nn.Linear(dim_last * (4 ** 2), 1),
             Rearrange('b 1 -> b')
