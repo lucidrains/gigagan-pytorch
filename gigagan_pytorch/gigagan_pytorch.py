@@ -361,8 +361,13 @@ class AdaptiveConv2DMod(nn.Module):
         if mod.shape[0] != b:
             mod = repeat(mod, 'b ... -> (s b) ...', s = b // mod.shape[0])
 
-        if kernel_mod.shape[0] != b:
-            kernel_mod = repeat(kernel_mod, 'b ... -> (s b) ...', s = b // kernel_mod.shape[0])
+        if exists(kernel_mod):
+            kernel_mod_has_el = kernel_mod.numel() > 0
+
+            assert self.adaptive or not kernel_mod_has_el
+
+            if kernel_mod_has_el and kernel_mod.shape[0] != b:
+                kernel_mod = repeat(kernel_mod, 'b ... -> (s b) ...', s = b // kernel_mod.shape[0])
 
         # prepare weights for modulation
 
@@ -373,7 +378,7 @@ class AdaptiveConv2DMod(nn.Module):
 
             # determine an adaptive weight and 'select' the kernel to use with softmax
 
-            assert exists(kernel_mod)
+            assert exists(kernel_mod) and kernel_mod.numel() > 0
 
             kernel_attn = kernel_mod.softmax(dim = -1)
             kernel_attn = rearrange(kernel_attn, 'b n -> b n 1 1 1 1')
@@ -996,7 +1001,7 @@ class Generator(BaseGenerator):
                 dim_out,            # second conv in resnet block
                 dim_kernel_mod,     # second conv kernel selection
                 dim_out,            # to RGB conv
-                dim_kernel_mod,     # RGB conv kernel selection
+                0,                  # RGB conv kernel selection
             ])
 
             self.layers.append(nn.ModuleList([
