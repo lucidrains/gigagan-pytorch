@@ -919,7 +919,7 @@ class Generator(BaseGenerator):
         num_layers = int(log2(image_size) - 1)
         self.num_layers = num_layers
 
-        resolutions = image_size / ((2 ** torch.arange(num_layers)))
+        resolutions = image_size / ((2 ** torch.arange(num_layers).flip(0)))
         resolutions = resolutions.long().tolist()
 
         dim_layers = (2 ** (torch.arange(num_layers) + 1)) * dim_capacity
