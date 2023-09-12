@@ -26,6 +26,7 @@ from ema_pytorch import EMA
 from gigagan_pytorch.version import __version__
 from gigagan_pytorch.open_clip import OpenClipAdapter
 from gigagan_pytorch.optimizer import get_optimizer
+from gigagan_pytorch.distributed import all_gather
 
 from tqdm import tqdm
 
@@ -175,8 +176,11 @@ def aux_clip_loss(
 ):
     assert exists(texts) ^ exists(text_embeds)
 
+    images, batch_sizes = all_gather(images, 0, None)
+
     if exists(texts):
         text_embeds, _ = clip.embed_texts(texts)
+        text_embeds, _ = all_gather(text_embeds, 0, batch_sizes)
 
     return clip.contrastive_loss(images = images, text_embeds = text_embeds)
 
@@ -1572,6 +1576,9 @@ class Discriminator(nn.Module):
     def resize_image_to(self, images, resolution):
         return F.interpolate(images, resolution, mode = self.resize_mode)
 
+    def real_images_to_rgbs(self, images):
+        return [self.resize_image_to(images, resolution) for resolution in self.multiscale_input_resolutions]
+
     @property
     def total_params(self):
         return sum([p.numel() for p in self.parameters()])
@@ -2160,7 +2167,7 @@ class GigaGAN(nn.Module):
             real_images = real_images.to(self.device)
             real_images.requires_grad_()
 
-            real_images_rgbs = [self.resize_image_to(real_images, resolution) for resolution in self.unwrapped_D.multiscale_input_resolutions]
+            real_images_rgbs = self.unwrapped_D.real_images_to_rgbs(real_images)
 
             # diff augment real images
 
@@ -2331,8 +2338,11 @@ class GigaGAN(nn.Module):
                         calc_aux_loss = False
                     )
 
+                    real_images_rgbs = self.D.real_images_to_rgbs(real_images)
+
                     real_logits, *_ = self.D(
                         real_images,
+                        real_images_rgbs,
                         texts = texts,
                         return_multiscale_outputs = False,
                         calc_aux_loss = False
