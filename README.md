@@ -214,6 +214,7 @@ $ accelerate launch train.py
     - [x] remove any magic being done with automatic rgbs processing, and have it explicitly passed in - offer functions on the discriminator that can process real images into the right multi-scales
     - [x] add horizontal flip for starters
 
+- [ ] move all modulation projections into the adaptive conv2d class
 - [ ] add accelerate
     - [x] works single machine
     - [x] works for mixed precision (make sure gradient penalty is scaled correctly), take care of manual scaler saving and reloading, borrow from imagen-pytorch
