@@ -399,7 +399,6 @@ class UnetUpsampler(BaseGenerator):
         num_resolutions = len(in_out)
 
         for ind, ((dim_in, dim_out), layer_full_attn, layer_cross_attn, layer_attn_depth) in enumerate(zip(in_out, full_attn, cross_attn, attn_depths)):
-            ind >= (num_resolutions - 1)
 
             should_not_downsample = ind < num_layer_no_downsample
             has_cross_attn = not self.unconditional and layer_cross_attn
