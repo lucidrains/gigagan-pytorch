@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 from math import log2
 from functools import partial
 
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.nn import Module, ModuleList
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
@@ -19,7 +22,7 @@ from gigagan_pytorch.gigagan_pytorch import (
 )
 
 from beartype import beartype
-from beartype.typing import Optional, List, Union, Dict, Iterable
+from beartype.typing import List, Dict, Iterable
 
 # helpers functions
 
@@ -48,7 +51,7 @@ def null_iterator():
 
 # small helper modules
 
-class PixelShuffleUpsample(nn.Module):
+class PixelShuffleUpsample(Module):
     def __init__(self, dim, dim_out = None):
         super().__init__()
         dim_out = default(dim_out, dim)
@@ -80,7 +83,7 @@ def Downsample(dim, dim_out = None):
         nn.Conv2d(dim * 4, default(dim_out, dim), 1)
     )
 
-class RMSNorm(nn.Module):
+class RMSNorm(Module):
     def __init__(self, dim):
         super().__init__()
         self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
@@ -90,7 +93,7 @@ class RMSNorm(nn.Module):
 
 # building block modules
 
-class Block(nn.Module):
+class Block(Module):
     def __init__(
         self,
         dim,
@@ -120,7 +123,7 @@ class Block(nn.Module):
         x = self.act(x)
         return x
 
-class ResnetBlock(nn.Module):
+class ResnetBlock(Module):
     def __init__(
         self,
         dim,
@@ -152,7 +155,7 @@ class ResnetBlock(nn.Module):
 
         return h + self.res_conv(x)
 
-class LinearAttention(nn.Module):
+class LinearAttention(Module):
     def __init__(
         self,
         dim,
@@ -191,7 +194,7 @@ class LinearAttention(nn.Module):
         out = rearrange(out, 'b h c (x y) -> b (h c) x y', h = self.heads, x = h, y = w)
         return self.to_out(out)
 
-class Attention(nn.Module):
+class Attention(Module):
     def __init__(
         self,
         dim,
@@ -234,7 +237,7 @@ def FeedForward(dim, mult = 4):
 
 # transformers
 
-class Transformer(nn.Module):
+class Transformer(Module):
     def __init__(
         self,
         dim,
@@ -245,10 +248,10 @@ class Transformer(nn.Module):
         ff_mult = 4
     ):
         super().__init__()
-        self.layers = nn.ModuleList([])
+        self.layers = ModuleList([])
 
         for _ in range(depth):
-            self.layers.append(nn.ModuleList([
+            self.layers.append(ModuleList([
                 Attention(dim = dim, dim_head = dim_head, heads = heads, flash = flash_attn),
                 FeedForward(dim = dim, mult = ff_mult)
             ]))
@@ -260,7 +263,7 @@ class Transformer(nn.Module):
 
         return x
 
-class LinearTransformer(nn.Module):
+class LinearTransformer(Module):
     def __init__(
         self,
         dim,
@@ -270,10 +273,10 @@ class LinearTransformer(nn.Module):
         ff_mult = 4
     ):
         super().__init__()
-        self.layers = nn.ModuleList([])
+        self.layers = ModuleList([])
 
         for _ in range(depth):
-            self.layers.append(nn.ModuleList([
+            self.layers.append(ModuleList([
                 LinearAttention(dim = dim, dim_head = dim_head, heads = heads),
                 FeedForward(dim = dim, mult = ff_mult)
             ]))
@@ -298,8 +301,8 @@ class UnetUpsampler(BaseGenerator):
         input_image_size,
         init_dim = None,
         out_dim = None,
-        text_encoder: Optional[Union[TextEncoder, Dict]] = None,
-        style_network: Optional[Union[StyleNetwork, Dict]] = None,
+        text_encoder: TextEncoder | Dict | None = None,
+        style_network: StyleNetwork | Dict | None = None,
         style_network_dim = None,
         dim_mults = (1, 2, 4, 8, 16),
         channels = 3,
@@ -315,6 +318,7 @@ class UnetUpsampler(BaseGenerator):
         cross_attn_dim_head = 64,
         cross_attn_heads = 8,
         cross_ff_mult = 4,
+        has_temporal_layers = False,
         mid_attn_depth = 1,
         num_conv_kernels = 2,
         resize_mode = 'bilinear',
@@ -322,6 +326,10 @@ class UnetUpsampler(BaseGenerator):
         skip_connect_scale = None
     ):
         super().__init__()
+
+        # able to upsample video
+
+        self.can_upsample_video = has_temporal_layers
 
         # style network
 
@@ -394,8 +402,8 @@ class UnetUpsampler(BaseGenerator):
 
         # layers
 
-        self.downs = nn.ModuleList([])
-        self.ups = nn.ModuleList([])
+        self.downs = ModuleList([])
+        self.ups = ModuleList([])
         num_resolutions = len(in_out)
 
         for ind, ((dim_in, dim_out), layer_full_attn, layer_cross_attn, layer_attn_depth) in enumerate(zip(in_out, full_attn, cross_attn, attn_depths)):
@@ -405,7 +413,7 @@ class UnetUpsampler(BaseGenerator):
 
             attn_klass = FullAttention if layer_full_attn else LinearTransformer
 
-            self.downs.append(nn.ModuleList([
+            self.downs.append(ModuleList([
                 block_klass(dim_in, dim_in),
                 block_klass(dim_in, dim_in),
                 CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = self_attn_ff_mult) if has_cross_attn else None,
@@ -423,7 +431,7 @@ class UnetUpsampler(BaseGenerator):
             attn_klass = FullAttention if layer_full_attn else LinearTransformer
             has_cross_attn = not self.unconditional and layer_cross_attn
 
-            self.ups.append(nn.ModuleList([
+            self.ups.append(ModuleList([
                 PixelShuffleUpsample(dim_out, dim_in),
                 Upsample(),
                 nn.Conv2d(dim_in, channels, 1),
@@ -468,7 +476,7 @@ class UnetUpsampler(BaseGenerator):
 
     def forward(
         self,
-        lowres_image,
+        lowres_image_or_video,
         styles = None,
         noise = None,
         texts: Optional[List[str]] = None,
@@ -478,7 +486,7 @@ class UnetUpsampler(BaseGenerator):
         return_all_rgbs = False,
         replace_rgb_with_input_lowres_image = True   # discriminator should also receive the low resolution image the upsampler sees
     ):
-        x = lowres_image
+        x = lowres_image_or_video
         shape = x.shape
         batch_size = shape[0]
 
@@ -510,6 +518,24 @@ class UnetUpsampler(BaseGenerator):
         conv_mods = self.style_to_conv_modulations(styles)
         conv_mods = conv_mods.split(self.style_embed_split_dims, dim = -1)
         conv_mods = iter(conv_mods)
+
+        # first detect whether input is image or video and handle accordingly
+
+        input_is_video = lowres_image_or_video.ndim == 5
+        assert not (not self.can_upsample_video and input_is_video), 'this network cannot upsample video unless you set `has_temporal_layers = True`'
+
+        fold_time_into_batch = identity
+        split_time_from_batch = identity
+
+        if input_is_video:
+            fold_time_into_batch = lambda t: rearrange(t, 'b c t h w -> (b t) c h w')
+            split_time_from_batch = lambda t: rearrange(t, '(b t) c h w -> b c t h w', b = batch_size)
+
+        x = fold_time_into_batch(x)
+
+        # set lowres_images for final rgb output
+
+        lowres_images = x
 
         # initial conv
 
@@ -585,6 +611,11 @@ class UnetUpsampler(BaseGenerator):
 
         rgb = rgb + self.final_to_rgb(x)
 
+        # handle video input
+
+        if input_is_video:
+            rgb = split_time_from_batch(rgb)
+
         if not return_all_rgbs:
             return rgb
 
@@ -594,6 +625,9 @@ class UnetUpsampler(BaseGenerator):
 
         # and return the original input image as the smallest rgb
 
-        rgbs = [lowres_image, *rgbs]
+        rgbs = [lowres_images, *rgbs]
+
+        if input_is_video:
+            rgbs = [*map(split_time_from_batch, rgbs)]
 
         return rgb, rgbs

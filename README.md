@@ -267,3 +267,14 @@ $ accelerate launch train.py
     year      = {2020}
 }
 ```
+
+```bibtex
+@article{Xu2024VideoGigaGANTD,
+    title   = {VideoGigaGAN: Towards Detail-rich Video Super-Resolution},
+    author  = {Yiran Xu and Taesung Park and Richard Zhang and Yang Zhou and Eli Shechtman and Feng Liu and Jia-Bin Huang and Difan Liu},
+    journal = {ArXiv},
+    year    = {2024},
+    volume  = {abs/2404.12388},
+    url     ={https://api.semanticscholar.org/CorpusID:269214195}
+}
+```
