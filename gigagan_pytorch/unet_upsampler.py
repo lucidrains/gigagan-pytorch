@@ -8,7 +8,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 
-from einops import rearrange, repeat
+from einops import rearrange, repeat, pack, unpack
 from einops.layers.torch import Rearrange
 
 from gigagan_pytorch.attend import Attend
@@ -18,8 +18,12 @@ from gigagan_pytorch.gigagan_pytorch import (
     AdaptiveConv2DMod,
     TextEncoder,
     CrossAttentionBlock,
-    Upsample
+    Upsample,
+    PixelShuffleUpsample,
+    Blur
 )
+
+from kornia.filters import filter3d
 
 from beartype import beartype
 from beartype.typing import List, Dict, Iterable
@@ -33,6 +37,12 @@ def default(val, d):
     if exists(val):
         return val
     return d() if callable(d) else d
+
+def pack_one(t, pattern):
+    return pack([t], pattern)
+
+def unpack_one(t, ps, pattern):
+    return unpack(t, ps, pattern)[0]
 
 def cast_tuple(t, length = 1):
     if isinstance(t, tuple):
@@ -51,25 +61,76 @@ def null_iterator():
 
 # small helper modules
 
-class PixelShuffleUpsample(Module):
+def interpolate_1d(x, length, mode = 'bilinear'):
+    x = rearrange(x, 'b c t -> b c t 1')
+    x = F.interpolate(x, (length, 1), mode = mode)
+    return rearrange(x, 'b c t 1 -> b c t')
+
+def Downsample(dim, dim_out = None):
+    return nn.Sequential(
+        Rearrange('b c (h p1) (w p2) -> b (c p1 p2) h w', p1 = 2, p2 = 2),
+        nn.Conv2d(dim * 4, default(dim_out, dim), 1)
+    )
+
+def TemporalDownsample(dim, dim_out = None):
+    return nn.Sequential(
+        Rearrange('b c (t p) h w -> b (c p) t h w', p = 2),
+        nn.Conv3d(dim * 2, default(dim_out, dim), 1)
+    )
+
+class TemporalBlur(Module):
+    def __init__(self):
+        super().__init__()
+        f = torch.Tensor([1, 2, 1])
+        self.register_buffer('f', f)
+
+    def forward(self, x):
+        f = repeat(self.f, 't -> 1 t h w', h = 3, w = 3)
+        return filter3d(x, f, normalized = True)
+
+class TemporalUpsample(Module):
+    def __init__(
+        self,
+        dim,
+        dim_out = None
+    ):
+        super().__init__()
+        self.blur = TemporalBlur()
+
+    def forward(self, x):
+        assert x.ndim == 5
+        time = x.shape[2]
+
+        x = rearrange(x, 'b c t h w -> b h w c t')
+        x, ps = pack_one(x, '* c t')
+
+        x = interpolate_1d(x, time * 2, mode = 'bilinear')
+
+        x = unpack_one(x, ps, '* c t')
+        x = rearrange(x, 'b h w c t -> b c t h w')
+        x = self.blur(x)
+        return x
+
+class PixelShuffleTemporalUpsample(Module):
     def __init__(self, dim, dim_out = None):
         super().__init__()
         dim_out = default(dim_out, dim)
 
-        conv = nn.Conv2d(dim, dim_out * 4, 1)
-        self.init_conv_(conv)
+        conv = nn.Conv3d(dim, dim_out * 2, 1)
 
         self.net = nn.Sequential(
             conv,
             nn.SiLU(),
-            nn.PixelShuffle(2)
+            Rearrange('b (c p) t h w -> b c (t p) h w', p = 2)
         )
 
+        self.init_conv_(conv)
+
     def init_conv_(self, conv):
-        o, *rest_shape = conv.weight.shape
-        conv_weight = torch.empty(o // 4, *rest_shape)
+        o, i, t, h, w = conv.weight.shape
+        conv_weight = torch.empty(o // 2, i, t, h, w)
         nn.init.kaiming_uniform_(conv_weight)
-        conv_weight = repeat(conv_weight, 'o ... -> (o 4) ...')
+        conv_weight = repeat(conv_weight, 'o ... -> (o 2) ...')
 
         conv.weight.data.copy_(conv_weight)
         nn.init.zeros_(conv.bias.data)
@@ -77,11 +138,7 @@ class PixelShuffleUpsample(Module):
     def forward(self, x):
         return self.net(x)
 
-def Downsample(dim, dim_out = None):
-    return nn.Sequential(
-        Rearrange('b c (h p1) (w p2) -> b (c p1 p2) h w', p1 = 2, p2 = 2),
-        nn.Conv2d(dim * 4, default(dim_out, dim), 1)
-    )
+# norm
 
 class RMSNorm(Module):
     def __init__(self, dim):
@@ -321,7 +378,6 @@ class UnetUpsampler(BaseGenerator):
         has_temporal_layers = False,
         mid_attn_depth = 1,
         num_conv_kernels = 2,
-        resize_mode = 'bilinear',
         unconditional = True,
         skip_connect_scale = None
     ):
@@ -413,12 +469,22 @@ class UnetUpsampler(BaseGenerator):
 
             attn_klass = FullAttention if layer_full_attn else LinearTransformer
 
+            # handle temporal layers
+
+            temporal_downsample = None
+
+            if has_temporal_layers:
+                temporal_downsample = TemporalDownsample(dim_out, dim_out) if not should_not_downsample else nn.Conv3d(dim_out, dim_out, 3, padding = 1)
+
+            # all unet downsample stages
+
             self.downs.append(ModuleList([
                 block_klass(dim_in, dim_in),
                 block_klass(dim_in, dim_in),
                 CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = self_attn_ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
-                Downsample(dim_in, dim_out) if not should_not_downsample else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
+                Downsample(dim_in, dim_out) if not should_not_downsample else nn.Conv2d(dim_in, dim_out, 3, padding = 1),
+                temporal_downsample
             ]))
 
         self.mid_block1 = block_klass(mid_dim, mid_dim)
@@ -431,9 +497,18 @@ class UnetUpsampler(BaseGenerator):
             attn_klass = FullAttention if layer_full_attn else LinearTransformer
             has_cross_attn = not self.unconditional and layer_cross_attn
 
+            temporal_upsample = None
+            temporal_upsample_rgb = None
+
+            if has_temporal_layers:
+                temporal_upsample = PixelShuffleTemporalUpsample(dim_in, dim_in)
+                temporal_upsample_rgb = TemporalUpsample(dim_in, dim_in)
+
             self.ups.append(ModuleList([
                 PixelShuffleUpsample(dim_out, dim_in),
                 Upsample(),
+                temporal_upsample,
+                temporal_upsample_rgb,
                 nn.Conv2d(dim_in, channels, 1),
                 block_klass(dim_in * 2, dim_in),
                 block_klass(dim_in * 2, dim_in),
@@ -446,10 +521,6 @@ class UnetUpsampler(BaseGenerator):
         self.final_res_block = block_klass(dim, dim)
 
         self.final_to_rgb = nn.Conv2d(dim, channels, 1)
-
-        # resize mode
-
-        self.resize_mode = resize_mode
 
         # determine the projection of the style embedding to convolutional modulation weights (+ adaptive kernel selection weights) for all layers
 
@@ -471,8 +542,9 @@ class UnetUpsampler(BaseGenerator):
     def total_params(self):
         return sum([p.numel() for p in self.parameters()])
 
-    def resize_image_to(self, x, size):
-        return F.interpolate(x, (size, size), mode = self.resize_mode)
+    def resize_to_same_dimensions(self, x, size):
+        mode = 'trilinear' if x.ndim == 5 else 'bilinear'
+        return F.interpolate(x, tuple(size), mode = mode)
 
     def forward(
         self,
@@ -545,7 +617,15 @@ class UnetUpsampler(BaseGenerator):
 
         # downsample stages
 
-        for block1, block2, cross_attn, attn, downsample in self.downs:
+        for (
+            block1,
+            block2,
+            cross_attn,
+            attn,
+            downsample,
+            temporal_downsample
+        ) in self.downs:
+
             x = block1(x, conv_mods_iter = conv_mods)
             h.append(x)
 
@@ -559,6 +639,11 @@ class UnetUpsampler(BaseGenerator):
             h.append(x)
 
             x = downsample(x)
+
+            if input_is_video and exists(temporal_downsample):
+                x = split_time_from_batch(x)
+                x = temporal_downsample(x)
+                x = fold_time_into_batch(x)
 
         x = self.mid_block1(x, conv_mods_iter = conv_mods)
         x = self.mid_attn(x)
@@ -576,20 +661,50 @@ class UnetUpsampler(BaseGenerator):
 
         # upsample stages
 
-        for upsample, upsample_rgb, to_rgb, block1, block2, cross_attn, attn in self.ups:
+        for (
+            upsample,
+            upsample_rgb,
+            temporal_upsample,
+            temporal_upsample_rgb,
+            to_rgb,
+            block1,
+            block2,
+            cross_attn,
+            attn
+        ) in self.ups:
 
             x = upsample(x)
             rgb = upsample_rgb(rgb)
 
+            if input_is_video:
+                x = split_time_from_batch(x)
+                rgb = split_time_from_batch(rgb)
+
+                x = temporal_upsample(x)
+                rgb = temporal_upsample_rgb(rgb)
+
+                x = fold_time_into_batch(x)
+                rgb = fold_time_into_batch(rgb)
+
             res1 = h.pop() * self.skip_connect_scale
             res2 = h.pop() * self.skip_connect_scale
 
-            fmap_size = x.shape[-1]
-            residual_fmap_size = res1.shape[-1]
+            # handle skip connections not being the same shape
 
-            if residual_fmap_size != fmap_size:
-                res1 = self.resize_image_to(res1, fmap_size)
-                res2 = self.resize_image_to(res2, fmap_size)
+
+            if x.shape[0] != res1.shape[0] or x.shape[2:] != res1.shape[2:]:
+                x = split_time_from_batch(x)
+                res1 = split_time_from_batch(res1)
+                res2 = split_time_from_batch(res2)
+
+                res1 = self.resize_to_same_dimensions(res1, x.shape[2:])
+                res2 = self.resize_to_same_dimensions(res2, x.shape[2:])
+
+                x = fold_time_into_batch(x)
+                res1 = fold_time_into_batch(res1)
+                res2 = fold_time_into_batch(res2)
+
+            # concat skip connections
 
             x = torch.cat((x, res1), dim = 1)
             x = block1(x, conv_mods_iter = conv_mods)

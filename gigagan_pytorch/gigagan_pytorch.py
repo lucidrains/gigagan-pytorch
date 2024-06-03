@@ -258,9 +258,10 @@ def Upsample(*args):
     )
 
 class PixelShuffleUpsample(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, dim_out = None):
         super().__init__()
-        conv = nn.Conv2d(dim, dim * 4, 1)
+        dim_out = default(dim_out, dim)
+        conv = nn.Conv2d(dim, dim_out * 4, 1)
 
         self.net = nn.Sequential(
             conv,
