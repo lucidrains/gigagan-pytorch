@@ -202,12 +202,17 @@ class ResnetBlock(Module):
         style_dims: List[int] = []
     ):
         super().__init__()
-        style_dims.extend([
+
+        mod_dims = [
             dim,
             num_conv_kernels,
             dim_out,
             num_conv_kernels
-        ])
+        ]
+
+        style_dims.extend(mod_dims)
+
+        self.num_mods = len(mod_dims)
 
         self.block1 = Block(dim, dim_out, num_conv_kernels = num_conv_kernels, conv_type = conv_type)
         self.block2 = Block(dim_out, dim_out, num_conv_kernels = num_conv_kernels, conv_type = conv_type)
@@ -670,7 +675,7 @@ class UnetUpsampler(BaseGenerator):
                 x = fold_time_into_batch(x)
 
             elif self.can_upsample_video:
-                conv_mods = islice(conv_mods, 4, None)
+                conv_mods = islice(conv_mods, self.num_mods, None)
 
             h.append(x)
 
@@ -770,7 +775,7 @@ class UnetUpsampler(BaseGenerator):
                 x = fold_time_into_batch(x)
 
             elif self.can_upsample_video:
-                conv_mods = islice(conv_mods, 4, None)
+                conv_mods = islice(conv_mods, self.num_mods, None)
 
             rgb = rgb + to_rgb(x)
             rgbs.append(rgb)
