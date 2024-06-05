@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from math import log2
 from functools import partial
+from itertools import islice
 
 import torch
 from torch import nn
@@ -16,6 +17,7 @@ from gigagan_pytorch.gigagan_pytorch import (
     BaseGenerator,
     StyleNetwork,
     AdaptiveConv2DMod,
+    AdaptiveConv1DMod,
     TextEncoder,
     CrossAttentionBlock,
     Upsample,
@@ -26,7 +28,7 @@ from gigagan_pytorch.gigagan_pytorch import (
 from kornia.filters import filter3d
 
 from beartype import beartype
-from beartype.typing import List, Dict, Iterable
+from beartype.typing import List, Dict, Iterable, Literal
 
 # helpers functions
 
@@ -143,24 +145,32 @@ class PixelShuffleTemporalUpsample(Module):
 class RMSNorm(Module):
     def __init__(self, dim):
         super().__init__()
-        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
+        self.scale = dim ** 0.5
+        self.gamma = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        return F.normalize(x, dim = 1) * self.g * (x.shape[1] ** 0.5)
+        spatial_dims = ((1,) * (x.ndim - 2))
+        gamma = self.gamma.reshape(-1, *spatial_dims)
+
+        return F.normalize(x, dim = 1) * gamma * self.scale
 
 # building block modules
 
 class Block(Module):
+    @beartype
     def __init__(
         self,
         dim,
         dim_out,
-        groups = 8,
-        num_conv_kernels = 0
+        num_conv_kernels = 0,
+        conv_type: Literal['1d', '2d'] = '2d',
     ):
         super().__init__()
-        self.proj = AdaptiveConv2DMod(dim, dim_out, kernel = 3, num_conv_kernels = num_conv_kernels)
-        self.norm = nn.GroupNorm(groups, dim_out)
+
+        adaptive_conv_klass = AdaptiveConv2DMod if conv_type == '2d' else AdaptiveConv1DMod
+
+        self.proj = adaptive_conv_klass(dim, dim_out, kernel = 3, num_conv_kernels = num_conv_kernels)
+        self.norm = RMSNorm(dim_out)
         self.act = nn.SiLU()
 
     def forward(
@@ -181,14 +191,15 @@ class Block(Module):
         return x
 
 class ResnetBlock(Module):
+    @beartype
     def __init__(
         self,
         dim,
         dim_out,
         *,
-        groups = 8,
         num_conv_kernels = 0,
-        style_dims: List = []
+        conv_type: Literal['1d', '2d'] = '2d',
+        style_dims: List[int] = []
     ):
         super().__init__()
         style_dims.extend([
@@ -198,9 +209,11 @@ class ResnetBlock(Module):
             num_conv_kernels
         ])
 
-        self.block1 = Block(dim, dim_out, groups = groups, num_conv_kernels = num_conv_kernels)
-        self.block2 = Block(dim_out, dim_out, groups = groups, num_conv_kernels = num_conv_kernels)
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+        self.block1 = Block(dim, dim_out, num_conv_kernels = num_conv_kernels, conv_type = conv_type)
+        self.block2 = Block(dim_out, dim_out, num_conv_kernels = num_conv_kernels, conv_type = conv_type)
+
+        conv_klass = nn.Conv2d if conv_type == '2d' else nn.Conv1d
+        self.res_conv = conv_klass(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(
         self,
@@ -363,7 +376,6 @@ class UnetUpsampler(BaseGenerator):
         style_network_dim = None,
         dim_mults = (1, 2, 4, 8, 16),
         channels = 3,
-        resnet_block_groups = 8,
         full_attn = (False, False, False, True, True),
         cross_attn = (False, False, False, True, True),
         flash_attn = True,
@@ -438,7 +450,6 @@ class UnetUpsampler(BaseGenerator):
 
         block_klass = partial(
             ResnetBlock,
-            groups = resnet_block_groups,
             num_conv_kernels = num_conv_kernels,
             style_dims = style_embed_split_dims
         )
@@ -484,7 +495,7 @@ class UnetUpsampler(BaseGenerator):
                 block_klass(dim_in, dim_in),
                 CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = self_attn_ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
-                nn.Identity(),
+                block_klass(dim_in, dim_in, conv_type = '1d'),
                 FullAttention(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_temporal_attn_depth),
                 Downsample(dim_in, dim_out) if not should_not_downsample else nn.Conv2d(dim_in, dim_out, 3, padding = 1),
                 temporal_downsample
@@ -517,7 +528,7 @@ class UnetUpsampler(BaseGenerator):
                 block_klass(dim_in * 2, dim_in),
                 CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = cross_ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = cross_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
-                nn.Identity(),
+                block_klass(dim_in, dim_in, conv_type = '1d'),
                 FullAttention(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_temporal_attn_depth),
             ]))
 
@@ -648,7 +659,7 @@ class UnetUpsampler(BaseGenerator):
                 x = rearrange(x, 'b c t h w-> b h w c t')
                 x, ps = pack_one(x, '* c t')
 
-                x = temporal_block(x)
+                x = temporal_block(x, conv_mods_iter = conv_mods)
 
                 x = rearrange(x, 'b c t -> b c t 1')
                 x = temporal_attn(x)
@@ -657,6 +668,9 @@ class UnetUpsampler(BaseGenerator):
                 x = unpack_one(x, ps, '* c t')
                 x = rearrange(x, 'b h w c t -> b c t h w')
                 x = fold_time_into_batch(x)
+
+            elif self.can_upsample_video:
+                conv_mods = islice(conv_mods, 4, None)
 
             h.append(x)
 
@@ -745,7 +759,7 @@ class UnetUpsampler(BaseGenerator):
                 x = rearrange(x, 'b c t h w-> b h w c t')
                 x, ps = pack_one(x, '* c t')
 
-                x = temporal_block(x)
+                x = temporal_block(x, conv_mods_iter = conv_mods)
 
                 x = rearrange(x, 'b c t -> b c t 1')
                 x = temporal_attn(x)
@@ -754,6 +768,9 @@ class UnetUpsampler(BaseGenerator):
                 x = unpack_one(x, ps, '* c t')
                 x = rearrange(x, 'b h w c t -> b c t h w')
                 x = fold_time_into_batch(x)
+
+            elif self.can_upsample_video:
+                conv_mods = islice(conv_mods, 4, None)
 
             rgb = rgb + to_rgb(x)
             rgbs.append(rgb)

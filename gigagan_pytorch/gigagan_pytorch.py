@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections import namedtuple
 from pathlib import Path
 from math import log2, sqrt
@@ -14,7 +16,7 @@ from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler
 
 from beartype import beartype
-from beartype.typing import List, Optional, Tuple, Dict, Union, Iterable
+from beartype.typing import List, Tuple, Dict, Iterable
 
 from einops import rearrange, pack, unpack, repeat, reduce
 from einops.layers.torch import Rearrange, Reduce
@@ -120,7 +122,7 @@ def gradient_penalty(
     outputs,
     grad_output_weights = None,
     weight = 10,
-    scaler: Optional[GradScaler] = None,
+    scaler: GradScaler | None = None,
     eps = 1e-4
 ):
     if not isinstance(outputs, (list, tuple)):
@@ -171,8 +173,8 @@ def aux_matching_loss(real, fake):
 def aux_clip_loss(
     clip: OpenClipAdapter,
     images: Tensor,
-    texts: Optional[List[str]] = None,
-    text_embeds: Optional[Tensor] = None
+    texts: List[str] | None = None,
+    text_embeds: Tensor | None = None
 ):
     assert exists(texts) ^ exists(text_embeds)
 
@@ -341,8 +343,8 @@ class AdaptiveConv2DMod(nn.Module):
     def forward(
         self,
         fmap,
-        mod: Optional[Tensor] = None,
-        kernel_mod: Optional[Tensor] = None
+        mod: Tensor,
+        kernel_mod: Tensor | None = None
     ):
         """
         notation
@@ -402,6 +404,104 @@ class AdaptiveConv2DMod(nn.Module):
 
         padding = get_same_padding(h, self.kernel, self.dilation, self.stride)
         fmap = F.conv2d(fmap, weights, padding = padding, groups = b)
+
+        return rearrange(fmap, '1 (b o) ... -> b o ...', b = b)
+
+class AdaptiveConv1DMod(nn.Module):
+    """ 1d version of adaptive conv, for time dimension in videogigagan """
+
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        kernel,
+        *,
+        demod = True,
+        stride = 1,
+        dilation = 1,
+        eps = 1e-8,
+        num_conv_kernels = 1 # set this to be greater than 1 for adaptive
+    ):
+        super().__init__()
+        self.eps = eps
+
+        self.dim_out = dim_out
+
+        self.kernel = kernel
+        self.stride = stride
+        self.dilation = dilation
+        self.adaptive = num_conv_kernels > 1
+
+        self.weights = nn.Parameter(torch.randn((num_conv_kernels, dim_out, dim, kernel)))
+
+        self.demod = demod
+
+        nn.init.kaiming_normal_(self.weights, a = 0, mode = 'fan_in', nonlinearity = 'leaky_relu')
+
+    def forward(
+        self,
+        fmap,
+        mod: Tensor,
+        kernel_mod: Tensor | None = None
+    ):
+        """
+        notation
+
+        b - batch
+        n - convs
+        o - output
+        i - input
+        k - kernel
+        """
+
+        b, t = fmap.shape[0], fmap.shape[-1]
+
+        # account for feature map that has been expanded by the scale in the first dimension
+        # due to multiscale inputs and outputs
+
+        if mod.shape[0] != b:
+            mod = repeat(mod, 'b ... -> (s b) ...', s = b // mod.shape[0])
+
+        if exists(kernel_mod):
+            kernel_mod_has_el = kernel_mod.numel() > 0
+
+            assert self.adaptive or not kernel_mod_has_el
+
+            if kernel_mod_has_el and kernel_mod.shape[0] != b:
+                kernel_mod = repeat(kernel_mod, 'b ... -> (s b) ...', s = b // kernel_mod.shape[0])
+
+        # prepare weights for modulation
+
+        weights = self.weights
+
+        if self.adaptive:
+            weights = repeat(weights, '... -> b ...', b = b)
+
+            # determine an adaptive weight and 'select' the kernel to use with softmax
+
+            assert exists(kernel_mod) and kernel_mod.numel() > 0
+
+            kernel_attn = kernel_mod.softmax(dim = -1)
+            kernel_attn = rearrange(kernel_attn, 'b n -> b n 1 1 1')
+
+            weights = reduce(weights * kernel_attn, 'b n ... -> b ...', 'sum')
+
+        # do the modulation, demodulation, as done in stylegan2
+
+        mod = rearrange(mod, 'b i -> b 1 i 1')
+
+        weights = weights * (mod + 1)
+
+        if self.demod:
+            inv_norm = reduce(weights ** 2, 'b o i k -> b o 1 1', 'sum').clamp(min = self.eps).rsqrt()
+            weights = weights * inv_norm
+
+        fmap = rearrange(fmap, 'b c t -> 1 (b c) t')
+
+        weights = rearrange(weights, 'b o ... -> (b o) ...')
+
+        padding = get_same_padding(t, self.kernel, self.dilation, self.stride)
+        fmap = F.conv1d(fmap, weights, padding = padding, groups = b)
 
         return rearrange(fmap, '1 (b o) ... -> b o ...', b = b)
 
@@ -711,7 +811,7 @@ class TextEncoder(nn.Module):
         *,
         dim,
         depth,
-        clip: Optional[OpenClipAdapter] = None,
+        clip: OpenClipAdapter | None = None,
         dim_head = 64,
         heads = 8,
     ):
@@ -738,8 +838,8 @@ class TextEncoder(nn.Module):
     @beartype
     def forward(
         self,
-        texts: Optional[List[str]] = None,
-        text_encodings: Optional[Tensor] = None
+        texts: List[str] | None = None,
+        text_encodings: Tensor | None = None
     ):
         assert exists(texts) ^ exists(text_encodings)
 
@@ -852,9 +952,9 @@ class Generator(BaseGenerator):
         dim_capacity = 16,
         dim_max = 2048,
         channels = 3,
-        style_network: Optional[Union[StyleNetwork, Dict]] = None,
+        style_network: StyleNetwork | Dict | None = None,
         style_network_dim = None,
-        text_encoder: Optional[Union[TextEncoder, Dict]] = None,
+        text_encoder: TextEncoder | Dict | None = None,
         dim_latent = 512,
         self_attn_resolutions: Tuple[int, ...] = (32, 16),
         self_attn_dim_head = 64,
@@ -1040,8 +1140,8 @@ class Generator(BaseGenerator):
         self,
         styles = None,
         noise = None,
-        texts: Optional[List[str]] = None,
-        text_encodings: Optional[Tensor] = None,
+        texts: List[str] | None = None,
+        text_encodings: Tensor | None = None,
         global_text_tokens = None,
         fine_text_tokens = None,
         text_mask = None,
@@ -1245,7 +1345,7 @@ class VisionAidedDiscriminator(nn.Module):
         depth = 2,
         dim_head = 64,
         heads = 8,
-        clip: Optional[OpenClipAdapter] = None,
+        clip: OpenClipAdapter | None = None,
         layer_indices = (-1, -2, -3),
         conv_dim = None,
         text_dim = None,
@@ -1292,8 +1392,8 @@ class VisionAidedDiscriminator(nn.Module):
     def forward(
         self,
         images,
-        texts: Optional[List[str]] = None,
-        text_embeds: Optional[Tensor] = None,
+        texts: List[str] | None = None,
+        text_embeds: Tensor | None = None,
         return_clip_encodings = False
     ):
 
@@ -1410,7 +1510,7 @@ class Discriminator(nn.Module):
         attn_heads = 8,
         self_attn_dot_product = False,
         ff_mult = 4,
-        text_encoder: Optional[Union[TextEncoder, Dict]] = None,
+        text_encoder: TextEncoder | Dict | None = None,
         text_dim = None,
         filter_input_resolutions: bool = True,
         multiscale_input_resolutions: Tuple[int, ...] = (64, 32, 16, 8),
@@ -1598,8 +1698,8 @@ class Discriminator(nn.Module):
         self,
         images,
         rgbs: List[Tensor],                   # multi-resolution inputs (rgbs) from the generator
-        texts: Optional[List[str]] = None,
-        text_encodings: Optional[Tensor] = None,
+        texts: List[str] | None = None,
+        text_encodings: Tensor | None = None,
         text_embeds = None,
         real_images = None,                   # if this were passed in, the network will automatically append the real to the presumably generated images passed in as the first argument, and generate all intermediate resolutions through resizing and concat appropriately
         return_multiscale_outputs = True,     # can force it not to return multi-scale logits
@@ -1759,10 +1859,10 @@ class GigaGAN(nn.Module):
     def __init__(
         self,
         *,
-        generator: Union[BaseGenerator, Dict],
-        discriminator: Union[Discriminator, Dict],
-        vision_aided_discriminator: Optional[Union[VisionAidedDiscriminator, Dict]] = None,
-        diff_augment: Optional[Union[DiffAugment, Dict]] = None,
+        generator: BaseGenerator | Dict,
+        discriminator: Discriminator | Dict,
+        vision_aided_discriminator: VisionAidedDiscriminator | Dict | None = None,
+        diff_augment: DiffAugment | Dict | None = None,
         learning_rate = 2e-4,
         betas = (0.5, 0.9),
         weight_decay = 0.,
@@ -1783,8 +1883,8 @@ class GigaGAN(nn.Module):
         num_samples = 25,
         model_folder = './gigagan-models',
         results_folder = './gigagan-results',
-        sample_upsampler_dl: Optional[DataLoader] = None,
-        accelerator: Optional[Accelerator] = None,
+        sample_upsampler_dl: DataLoader | None = None,
+        accelerator: Accelerator | None = None,
         accelerate_kwargs: dict = {},
         find_unused_parameters = True,
         amp = False,
@@ -2379,7 +2479,7 @@ class GigaGAN(nn.Module):
     def train_generator_step(
         self,
         batch_size = None,
-        dl_iter: Optional[Iterable] = None,
+        dl_iter: Iterable | None = None,
         grad_accum_every = 1,
         calc_multiscale_loss = True
     ):
