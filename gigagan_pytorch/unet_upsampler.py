@@ -166,7 +166,7 @@ class Block(Module):
     def forward(
         self,
         x,
-        conv_mods_iter: Optional[Iterable] = None
+        conv_mods_iter: Iterable | None = None
     ):
         conv_mods_iter = default(conv_mods_iter, null_iterator())
 
@@ -205,7 +205,7 @@ class ResnetBlock(Module):
     def forward(
         self,
         x,
-        conv_mods_iter: Optional[Iterable] = None
+        conv_mods_iter: Iterable | None = None
     ):
         h = self.block1(x, conv_mods_iter = conv_mods_iter)
         h = self.block2(h, conv_mods_iter = conv_mods_iter)
@@ -372,6 +372,7 @@ class UnetUpsampler(BaseGenerator):
         self_attn_dot_product = True,
         self_attn_ff_mult = 4,
         attn_depths = (1, 1, 1, 1, 1),
+        temporal_attn_depths = (1, 1, 1, 1, 1),
         cross_attn_dim_head = 64,
         cross_attn_heads = 8,
         cross_ff_mult = 4,
@@ -462,7 +463,7 @@ class UnetUpsampler(BaseGenerator):
         self.ups = ModuleList([])
         num_resolutions = len(in_out)
 
-        for ind, ((dim_in, dim_out), layer_full_attn, layer_cross_attn, layer_attn_depth) in enumerate(zip(in_out, full_attn, cross_attn, attn_depths)):
+        for ind, ((dim_in, dim_out), layer_full_attn, layer_cross_attn, layer_attn_depth, layer_temporal_attn_depth) in enumerate(zip(in_out, full_attn, cross_attn, attn_depths, temporal_attn_depths)):
 
             should_not_downsample = ind < num_layer_no_downsample
             has_cross_attn = not self.unconditional and layer_cross_attn
@@ -483,6 +484,8 @@ class UnetUpsampler(BaseGenerator):
                 block_klass(dim_in, dim_in),
                 CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = self_attn_ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
+                nn.Identity(),
+                FullAttention(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_temporal_attn_depth),
                 Downsample(dim_in, dim_out) if not should_not_downsample else nn.Conv2d(dim_in, dim_out, 3, padding = 1),
                 temporal_downsample
             ]))
@@ -492,7 +495,7 @@ class UnetUpsampler(BaseGenerator):
         self.mid_block2 = block_klass(mid_dim, mid_dim)
         self.mid_to_rgb = nn.Conv2d(mid_dim, channels, 1)
 
-        for ind, ((dim_in, dim_out), layer_cross_attn, layer_full_attn, layer_attn_depth) in enumerate(zip(reversed(in_out), reversed(full_attn), reversed(cross_attn), reversed(attn_depths))):
+        for ind, ((dim_in, dim_out), layer_cross_attn, layer_full_attn, layer_attn_depth, layer_temporal_attn_depth) in enumerate(zip(reversed(in_out), reversed(full_attn), reversed(cross_attn), reversed(attn_depths), reversed(temporal_attn_depths))):
 
             attn_klass = FullAttention if layer_full_attn else LinearTransformer
             has_cross_attn = not self.unconditional and layer_cross_attn
@@ -514,6 +517,8 @@ class UnetUpsampler(BaseGenerator):
                 block_klass(dim_in * 2, dim_in),
                 CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = cross_ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = cross_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
+                nn.Identity(),
+                FullAttention(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_temporal_attn_depth),
             ]))
 
         self.out_dim = default(out_dim, channels)
@@ -551,7 +556,7 @@ class UnetUpsampler(BaseGenerator):
         lowres_image_or_video,
         styles = None,
         noise = None,
-        texts: Optional[List[str]] = None,
+        texts: List[str] | None = None,
         global_text_tokens = None,
         fine_text_tokens = None,
         text_mask = None,
@@ -622,6 +627,8 @@ class UnetUpsampler(BaseGenerator):
             block2,
             cross_attn,
             attn,
+            temporal_block,
+            temporal_attn,
             downsample,
             temporal_downsample
         ) in self.downs:
@@ -635,6 +642,21 @@ class UnetUpsampler(BaseGenerator):
 
             if exists(cross_attn):
                 x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
+
+            if input_is_video:
+                x = split_time_from_batch(x)
+                x = rearrange(x, 'b c t h w-> b h w c t')
+                x, ps = pack_one(x, '* c t')
+
+                x = temporal_block(x)
+
+                x = rearrange(x, 'b c t -> b c t 1')
+                x = temporal_attn(x)
+                x = rearrange(x, 'b c t 1 -> b c t')
+
+                x = unpack_one(x, ps, '* c t')
+                x = rearrange(x, 'b h w c t -> b c t h w')
+                x = fold_time_into_batch(x)
 
             h.append(x)
 
@@ -670,7 +692,9 @@ class UnetUpsampler(BaseGenerator):
             block1,
             block2,
             cross_attn,
-            attn
+            attn,
+            temporal_block,
+            temporal_attn,
         ) in self.ups:
 
             x = upsample(x)
@@ -690,7 +714,6 @@ class UnetUpsampler(BaseGenerator):
             res2 = h.pop() * self.skip_connect_scale
 
             # handle skip connections not being the same shape
-
 
             if x.shape[0] != res1.shape[0] or x.shape[2:] != res1.shape[2:]:
                 x = split_time_from_batch(x)
@@ -716,6 +739,21 @@ class UnetUpsampler(BaseGenerator):
                 x = cross_attn(x, context = fine_text_tokens, mask = text_mask)
 
             x = attn(x)
+
+            if input_is_video:
+                x = split_time_from_batch(x)
+                x = rearrange(x, 'b c t h w-> b h w c t')
+                x, ps = pack_one(x, '* c t')
+
+                x = temporal_block(x)
+
+                x = rearrange(x, 'b c t -> b c t 1')
+                x = temporal_attn(x)
+                x = rearrange(x, 'b c t 1 -> b c t')
+
+                x = unpack_one(x, ps, '* c t')
+                x = rearrange(x, 'b h w c t -> b c t h w')
+                x = fold_time_into_batch(x)
 
             rgb = rgb + to_rgb(x)
             rgbs.append(rgb)
