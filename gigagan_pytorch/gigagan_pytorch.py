@@ -250,7 +250,7 @@ class Blur(nn.Module):
 
     def forward(self, x):
         f = self.f
-        f = f[None, None, :] * f [None, :, None]
+        f = f[None, None, :] * f[None, :, None]
         return filter2d(x, f, normalized = True)
 
 def Upsample(*args):

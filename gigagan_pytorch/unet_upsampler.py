@@ -25,7 +25,7 @@ from gigagan_pytorch.gigagan_pytorch import (
     Blur
 )
 
-from kornia.filters import filter3d
+from kornia.filters import filter3d, filter2d
 
 from beartype import beartype
 from beartype.typing import List, Dict, Iterable, Literal
@@ -68,17 +68,84 @@ def interpolate_1d(x, length, mode = 'bilinear'):
     x = F.interpolate(x, (length, 1), mode = mode)
     return rearrange(x, 'b c t 1 -> b c t')
 
-def Downsample(dim, dim_out = None):
-    return nn.Sequential(
-        Rearrange('b c (h p1) (w p2) -> b (c p1 p2) h w', p1 = 2, p2 = 2),
-        nn.Conv2d(dim * 4, default(dim_out, dim), 1)
-    )
+class Downsample(Module):
+    def __init__(
+        self,
+        dim,
+        dim_out = None,
+        skip_downsample = False,
+        has_temporal_layers = False
+    ):
+        super().__init__()
+        dim_out = default(dim_out, dim)
 
-def TemporalDownsample(dim, dim_out = None):
-    return nn.Sequential(
-        Rearrange('b c (t p) h w -> b (c p) t h w', p = 2),
-        nn.Conv3d(dim * 2, default(dim_out, dim), 1)
-    )
+        self.skip_downsample = skip_downsample
+
+        self.conv2d = nn.Conv2d(dim, dim_out, 3, padding = 1)
+
+        self.has_temporal_layers = has_temporal_layers
+
+        if has_temporal_layers:
+            self.conv1d = nn.Conv1d(dim_out, dim_out, 3, padding = 1)
+
+            nn.init.dirac_(self.conv1d.weight)
+            nn.init.zeros_(self.conv1d.bias)
+
+        self.register_buffer('filter', torch.Tensor([1., 2., 1.]))
+
+    def forward(self, x):
+        batch = x.shape[0]
+        is_input_video = x.ndim == 5
+
+        assert not (is_input_video and not self.has_temporal_layers)
+
+        if is_input_video:
+            x = rearrange(x, 'b c t h w -> (b t) c h w')
+
+        x = self.conv2d(x)
+
+        if is_input_video:
+            x = rearrange(x, '(b t) c h w -> b h w c t', b = batch)
+            x, ps = pack_one(x, '* c t')
+
+            x = self.conv1d(x)
+
+            x = unpack_one(x, ps, '* c t')
+            x = rearrange(x, 'b h w c t -> b c t h w')
+
+        # if not downsampling, early return
+
+        if self.skip_downsample:
+            return x, x[:, 0:0]
+
+        # save before blur to subtract out for high frequency fmap skip connection
+
+        before_blur_input = x
+
+        # blur 2d or 3d, depending
+
+        f = self.filter
+
+        if is_input_video:
+            f = f[None, None, None, :] * f[None, None, :, None] * f[None, :, None, None]
+            filter_fn = filter3d
+            maxpool_fn = F.max_pool3d
+        else:
+            f = f[None, None, :] * f[None, :, None]
+            filter_fn = filter2d
+            maxpool_fn = F.max_pool2d
+
+        blurred = filter_fn(x, f, normalized = True)
+
+        # get high frequency fmap
+
+        high_freq_fmap = before_blur_input - blurred
+
+        # max pool 2d or 3d, depending
+
+        x = maxpool_fn(x, kernel_size = 2)
+
+        return x, high_freq_fmap
 
 class TemporalBlur(Module):
     def __init__(self):
@@ -478,6 +545,7 @@ class UnetUpsampler(BaseGenerator):
         self.downs = ModuleList([])
         self.ups = ModuleList([])
         num_resolutions = len(in_out)
+        skip_connect_dims = []
 
         for ind, ((dim_in, dim_out), layer_full_attn, layer_cross_attn, layer_attn_depth, layer_temporal_attn_depth) in enumerate(zip(in_out, full_attn, cross_attn, attn_depths, temporal_attn_depths)):
 
@@ -486,12 +554,8 @@ class UnetUpsampler(BaseGenerator):
 
             attn_klass = FullAttention if layer_full_attn else LinearTransformer
 
-            # handle temporal layers
-
-            temporal_downsample = None
-
-            if has_temporal_layers:
-                temporal_downsample = TemporalDownsample(dim_out, dim_out) if not should_not_downsample else nn.Conv3d(dim_out, dim_out, 3, padding = 1)
+            skip_connect_dims.append(dim_in)
+            skip_connect_dims.append(dim_in + (dim_out if not should_not_downsample else 0))
 
             # all unet downsample stages
 
@@ -502,8 +566,7 @@ class UnetUpsampler(BaseGenerator):
                 attn_klass(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
                 block_klass(dim_in, dim_in, conv_type = '1d'),
                 FullAttention(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_temporal_attn_depth),
-                Downsample(dim_in, dim_out) if not should_not_downsample else nn.Conv2d(dim_in, dim_out, 3, padding = 1),
-                temporal_downsample
+                Downsample(dim_in, dim_out, skip_downsample = should_not_downsample, has_temporal_layers = has_temporal_layers)
             ]))
 
         self.mid_block1 = block_klass(mid_dim, mid_dim)
@@ -529,8 +592,8 @@ class UnetUpsampler(BaseGenerator):
                 temporal_upsample,
                 temporal_upsample_rgb,
                 nn.Conv2d(dim_in, channels, 1),
-                block_klass(dim_in * 2, dim_in),
-                block_klass(dim_in * 2, dim_in),
+                block_klass(dim_in + skip_connect_dims.pop(), dim_in),
+                block_klass(dim_in + skip_connect_dims.pop(), dim_in),
                 CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = cross_ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = cross_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
                 block_klass(dim_in, dim_in, conv_type = '1d'),
@@ -646,7 +709,6 @@ class UnetUpsampler(BaseGenerator):
             temporal_block,
             temporal_attn,
             downsample,
-            temporal_downsample
         ) in self.downs:
 
             x = block1(x, conv_mods_iter = conv_mods)
@@ -675,16 +737,24 @@ class UnetUpsampler(BaseGenerator):
                 x = fold_time_into_batch(x)
 
             elif self.can_upsample_video:
-                conv_mods = islice(conv_mods, self.num_mods, None)
+                conv_mods = islice(conv_mods, temporal_block.num_mods, None)
 
-            h.append(x)
+            skip_connect = x
 
-            x = downsample(x)
+            # downsample with hf shuttle
 
-            if input_is_video and exists(temporal_downsample):
-                x = split_time_from_batch(x)
-                x = temporal_downsample(x)
-                x = fold_time_into_batch(x)
+            x = split_time_from_batch(x)
+
+            x, hf_fmap = downsample(x)
+
+            x = fold_time_into_batch(x)
+            hf_fmap = fold_time_into_batch(hf_fmap)
+
+            # add high freq fmap to skip connection as proposed in videogigagan
+
+            skip_connect = torch.cat((skip_connect, hf_fmap), dim = 1)
+
+            h.append(skip_connect)
 
         x = self.mid_block1(x, conv_mods_iter = conv_mods)
         x = self.mid_attn(x)
@@ -775,7 +845,7 @@ class UnetUpsampler(BaseGenerator):
                 x = fold_time_into_batch(x)
 
             elif self.can_upsample_video:
-                conv_mods = islice(conv_mods, self.num_mods, None)
+                conv_mods = islice(conv_mods, temporal_block.num_mods, None)
 
             rgb = rgb + to_rgb(x)
             rgbs.append(rgb)
