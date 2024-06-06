@@ -136,17 +136,18 @@ class Downsample(Module):
         # blur 2d or 3d, depending
 
         f = self.filter
+        N = None
 
         if is_input_video:
-            f = f[None, None, None, :] * f[None, None, :, None] * f[None, :, None, None]
+            f = f[N, N, :] * f[N, :, N] * f[:, N, N]
             filter_fn = filter3d
             maxpool_fn = F.max_pool3d
         else:
-            f = f[None, None, :] * f[None, :, None]
+            f = f[N, :] * f[:, N]
             filter_fn = filter2d
             maxpool_fn = F.max_pool2d
 
-        blurred = filter_fn(x, f, normalized = True)
+        blurred = filter_fn(x, f[N, ...], normalized = True)
 
         # get high frequency fmap
 
