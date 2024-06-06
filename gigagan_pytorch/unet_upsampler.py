@@ -61,6 +61,17 @@ def null_iterator():
     while True:
         yield None
 
+def fold_space_into_batch(x):
+    x = rearrange(x, 'b c t h w -> b h w c t')
+    x, ps = pack_one(x, '* c t')
+
+    def split_space_from_batch(out):
+        out = unpack_one(x, ps, '* c t')
+        out = rearrange(out, 'b h w c t -> b c t h w')
+        return out
+
+    return x, split_space_from_batch
+
 # small helper modules
 
 def interpolate_1d(x, length, mode = 'bilinear'):
@@ -557,6 +568,13 @@ class UnetUpsampler(BaseGenerator):
             skip_connect_dims.append(dim_in)
             skip_connect_dims.append(dim_in + (dim_out if not should_not_downsample else 0))
 
+            temporal_resnet_block = None
+            temporal_attn = None
+
+            if has_temporal_layers:
+                temporal_resnet_block = block_klass(dim_in, dim_in, conv_type = '1d')
+                temporal_attn = FullAttention(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_temporal_attn_depth)
+
             # all unet downsample stages
 
             self.downs.append(ModuleList([
@@ -564,8 +582,8 @@ class UnetUpsampler(BaseGenerator):
                 block_klass(dim_in, dim_in),
                 CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = self_attn_ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
-                block_klass(dim_in, dim_in, conv_type = '1d'),
-                FullAttention(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_temporal_attn_depth),
+                temporal_resnet_block,
+                temporal_attn,
                 Downsample(dim_in, dim_out, skip_downsample = should_not_downsample, has_temporal_layers = has_temporal_layers)
             ]))
 
@@ -581,10 +599,15 @@ class UnetUpsampler(BaseGenerator):
 
             temporal_upsample = None
             temporal_upsample_rgb = None
+            temporal_resnet_block = None
+            temporal_attn = None
 
             if has_temporal_layers:
                 temporal_upsample = PixelShuffleTemporalUpsample(dim_in, dim_in)
                 temporal_upsample_rgb = TemporalUpsample(dim_in, dim_in)
+
+                temporal_resnet_block = block_klass(dim_in, dim_in, conv_type = '1d')
+                temporal_attn = FullAttention(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_temporal_attn_depth)
 
             self.ups.append(ModuleList([
                 PixelShuffleUpsample(dim_out, dim_in),
@@ -596,8 +619,8 @@ class UnetUpsampler(BaseGenerator):
                 block_klass(dim_in + skip_connect_dims.pop(), dim_in),
                 CrossAttentionBlock(dim_in, dim_context = text_encoder.dim, dim_head = self_attn_dim_head, heads = self_attn_heads, ff_mult = cross_ff_mult) if has_cross_attn else None,
                 attn_klass(dim_in, dim_head = cross_attn_dim_head, heads = self_attn_heads, depth = layer_attn_depth),
-                block_klass(dim_in, dim_in, conv_type = '1d'),
-                FullAttention(dim_in, dim_head = self_attn_dim_head, heads = self_attn_heads, depth = layer_temporal_attn_depth),
+                temporal_resnet_block,
+                temporal_attn
             ]))
 
         self.out_dim = default(out_dim, channels)
@@ -723,8 +746,7 @@ class UnetUpsampler(BaseGenerator):
 
             if input_is_video:
                 x = split_time_from_batch(x)
-                x = rearrange(x, 'b c t h w-> b h w c t')
-                x, ps = pack_one(x, '* c t')
+                x, split_space_back = fold_space_into_batch(x)
 
                 x = temporal_block(x, conv_mods_iter = conv_mods)
 
@@ -732,8 +754,7 @@ class UnetUpsampler(BaseGenerator):
                 x = temporal_attn(x)
                 x = rearrange(x, 'b c t 1 -> b c t')
 
-                x = unpack_one(x, ps, '* c t')
-                x = rearrange(x, 'b h w c t -> b c t h w')
+                x = split_space_back(x)
                 x = fold_time_into_batch(x)
 
             elif self.can_upsample_video:
@@ -831,8 +852,7 @@ class UnetUpsampler(BaseGenerator):
 
             if input_is_video:
                 x = split_time_from_batch(x)
-                x = rearrange(x, 'b c t h w-> b h w c t')
-                x, ps = pack_one(x, '* c t')
+                x, split_space_back = fold_space_into_batch(x)
 
                 x = temporal_block(x, conv_mods_iter = conv_mods)
 
@@ -840,8 +860,7 @@ class UnetUpsampler(BaseGenerator):
                 x = temporal_attn(x)
                 x = rearrange(x, 'b c t 1 -> b c t')
 
-                x = unpack_one(x, ps, '* c t')
-                x = rearrange(x, 'b h w c t -> b c t h w')
+                x = split_space_back(x)
                 x = fold_time_into_batch(x)
 
             elif self.can_upsample_video:
