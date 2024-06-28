@@ -167,7 +167,7 @@ A healthy run would have `G`, `MSG`, `D`, `MSD` with values hovering between `0`
 
 ## Multi-GPU Training
 
-The `GigaGAN` class is now equipped with <a href="https://huggingface.co/docs/accelerate/accelerator">🤗 Accelerator</a>. You can easily do multi-gpu training in two steps using their `accelerate` CLI
+The `GigaGAN` class is now equipped with <a href="https://huggingface.co/docs/accelerate/en/package_reference/accelerator">🤗 Accelerator</a>. You can easily do multi-gpu training in two steps using their `accelerate` CLI
 
 At the project root directory, where the training script is, run
 
