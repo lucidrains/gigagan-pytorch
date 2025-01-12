@@ -122,6 +122,7 @@ def gradient_penalty(
     outputs,
     grad_output_weights = None,
     weight = 10,
+    center = 0.,
     scaler: GradScaler | None = None,
     eps = 1e-4
 ):
@@ -151,7 +152,7 @@ def gradient_penalty(
         gradients = maybe_scaled_gradients * inv_scale
 
     gradients = rearrange(gradients, 'b ... -> b (...)')
-    return weight * ((gradients.norm(2, dim = 1) - 1) ** 2).mean()
+    return weight * ((gradients.norm(2, dim = 1) - center) ** 2).mean()
 
 # hinge gan losses
 
@@ -2308,9 +2309,11 @@ class GigaGAN(nn.Module):
                 # detach output of generator, as training discriminator only
 
                 images.detach_()
+                images.requires_grad_()
 
                 for rgb in rgbs:
                     rgb.detach_()
+                    rgb.requires_grad_()
 
             # main divergence loss
 
@@ -2352,12 +2355,21 @@ class GigaGAN(nn.Module):
                 gp_loss = 0.
 
                 if apply_gradient_penalty:
-                    gp_loss = gradient_penalty(
+                    real_gp_loss = gradient_penalty(
                         real_images,
                         outputs = [real_logits, *real_multiscale_logits],
                         grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(real_multiscale_logits)],
                         scaler = self.D_opt.scaler
                     )
+
+                    fake_gp_loss = gradient_penalty(
+                        images,
+                        outputs = [fake_logits, *fake_multiscale_logits],
+                        grad_output_weights = [1., *(self.multiscale_divergence_loss_weight,) * len(fake_multiscale_logits)],
+                        scaler = self.D_opt.scaler
+                    )
+
+                    gp_loss = real_gp_loss + fake_gp_loss
 
                     if not torch.isnan(gp_loss):
                         total_gp_loss += (gp_loss.item() / grad_accum_every)

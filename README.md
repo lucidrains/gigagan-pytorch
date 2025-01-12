@@ -278,3 +278,12 @@ $ accelerate launch train.py
     url     ={https://api.semanticscholar.org/CorpusID:269214195}
 }
 ```
+
+```bibtex
+@inproceedings{Huang2025TheGI,
+    title   = {The GAN is dead; long live the GAN! A Modern GAN Baseline},
+    author  = {Yiwen Huang and Aaron Gokaslan and Volodymyr Kuleshov and James Tompkin},
+    year    = {2025},
+    url     = {https://api.semanticscholar.org/CorpusID:275405495}
+}
+```
